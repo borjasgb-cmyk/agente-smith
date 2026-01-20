@@ -42,7 +42,35 @@ print("Beep OK en device={}".format(idx))
 $pyBeep | & $VenvPy - $env:SPK_DEV_INDEX
 
 if (-not $env:MIC_DEV_INDEX) { $env:MIC_DEV_INDEX = "18" }
-if (-not $env:SYS_DEV_INDEX) { $env:SYS_DEV_INDEX = "17" }
+if (-not $env:SYS_DEV_INDEX) {
+    $pyFindSys = @'
+import sounddevice as sd
+devices = sd.query_devices()
+hostapis = sd.query_hostapis()
+matches = []
+for i, dev in enumerate(devices):
+    if "cable output" in dev.get("name", "").lower():
+        matches.append(i)
+if not matches:
+    print("")
+    raise SystemExit(0)
+if len(matches) == 1:
+    print(matches[0])
+    raise SystemExit(0)
+for idx in matches:
+    host = hostapis[devices[idx]["hostapi"]]["name"]
+    if "WASAPI" in host.upper():
+        print(idx)
+        raise SystemExit(0)
+print(matches[0])
+'@
+    $sysCandidate = $pyFindSys | & $VenvPy -
+    if ($sysCandidate) {
+        $env:SYS_DEV_INDEX = $sysCandidate.Trim()
+    } else {
+        $env:SYS_DEV_INDEX = "17"
+    }
+}
 if (-not $env:CAPTURE_SYS) { $env:CAPTURE_SYS = "1" }
 if (-not $env:PYTHONIOENCODING) { $env:PYTHONIOENCODING = "utf-8" }
 
