@@ -54,6 +54,7 @@ ENV/
 env.bak/
 venv.bak/
 /fishenv/
+fishspeech_env/
 
 # Project Dependencies
 # --------------------
@@ -65,6 +66,7 @@ venv.bak/
 data/
 results/
 checkpoints/
+models/
 references/
 demo-audios/
 example/
@@ -75,6 +77,7 @@ filelists/
 # -----------
 *.wav
 *.mp3
+*.mp4
 *.flac
 *.ogg
 *.m4a
@@ -96,6 +99,8 @@ filelists/
 .pgx.*
 *log
 *.log
+output/
+logs/
 
 # External Tools
 # --------------
@@ -111,3 +116,7 @@ ffprobe.exe
 # ----------
 /*.test.sh
 asr-label*
+
+# Secrets
+# -------
+*.key
