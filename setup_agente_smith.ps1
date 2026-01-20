@@ -103,7 +103,7 @@ if (Test-Path $Paths.AgenteSmith) {
 }
 
 # 6) Configuración de dispositivos
-$deviceInfoJson = & $VenvPython - <<'PY'
+$deviceInfoJson = @'
 import json
 try:
     import sounddevice as sd
@@ -136,7 +136,7 @@ payload = {
     "spk_fallback": spk_fallback,
 }
 print(json.dumps(payload))
-PY
+'@ | & $VenvPython -
 
 if ($deviceInfoJson) {
     $deviceInfo = $deviceInfoJson | ConvertFrom-Json
@@ -161,7 +161,7 @@ if ($deviceInfoJson) {
 
 # 8) Test de audio: pitido
 try {
-    & $VenvPython - <<'PY'
+    @'
 import os
 import numpy as np
 import sounddevice as sd
@@ -177,7 +177,7 @@ samples = (np.sin(2 * np.pi * np.arange(fs * seconds) * freq / fs)).astype(np.fl
 sd.play(samples, fs, device=dev)
 
 sd.wait()
-PY
+'@ | & $VenvPython -
     Write-Status "Test de audio ejecutado (pitido)."
 } catch {
     Write-Status "No se pudo ejecutar el test de audio." "WARN"
