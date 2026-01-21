@@ -50,6 +50,18 @@ C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.p
 
 ### Agente Smith Control Panel
 
+### n8n
+
+En la pesta?a n8n puedes configurar `N8N_BASE_URL`, `N8N_WEBHOOK_URL` y `N8N_API_KEY` (opcional).
+Si defines `N8N_WEBHOOK_URL`, los eventos se envian por POST.
+Si solo usas BASE_URL + API_KEY, se asume `/rest/settings` para test y se requiere webhook para eventos.
+
+### Smoke test UI
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\smoke_test_ui.ps1
+```
+
 Lanzador recomendado (CPU por defecto):
 ```powershell
 C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.py --device cpu

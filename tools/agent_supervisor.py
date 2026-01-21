@@ -85,6 +85,10 @@ class AgentSupervisor:
             )
             self._reader = threading.Thread(target=self._reader_loop, daemon=True)
             self._reader.start()
+            emit_event(
+                "agent_started",
+                {"mic_idx": mic_idx, "sys_idx": sys_idx, "mode": mode},
+            )
             return "Agente iniciado"
 
     def stop(self) -> str:
@@ -93,11 +97,14 @@ class AgentSupervisor:
                 return "Agente no esta en ejecucion"
             assert self._process is not None
             self._process.terminate()
-        time.sleep(0.5)
-        with self._lock:
-            if self.is_running():
-                assert self._process is not None
-                self._process.kill()
+        try:
+            self._process.wait(timeout=2)
+        except Exception:
+            with self._lock:
+                if self.is_running():
+                    assert self._process is not None
+                    self._process.kill()
+        emit_event("agent_stopped", {})
         return "Agente detenido"
 
     def _reader_loop(self) -> None:
@@ -112,10 +119,13 @@ class AgentSupervisor:
             lower = clean.lower()
             if "[mic]" in lower or "transcripcion[mic]" in lower:
                 self._mic_lines.append(clean)
+                emit_event("transcript_mic", {"text": clean})
             if "[sys]" in lower or "transcripcion[sys]" in lower:
                 self._sys_lines.append(clean)
+                emit_event("transcript_sys", {"text": clean})
             if "warn" in lower:
                 self._warnings.append(clean)
+                emit_event("warning", {"text": clean})
 
     def status(self) -> dict:
         return {
@@ -130,3 +140,4 @@ class AgentSupervisor:
 
 
 SUPERVISOR = AgentSupervisor()
+from tools.n8n_client import emit_event

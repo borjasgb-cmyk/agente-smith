@@ -124,8 +124,12 @@ def load_config(path: str | None = None) -> dict:
         return {}
 
 
-def save_config(voice_id: str | None, path: str | None = None) -> None:
+def save_config(update: dict | str | None, path: str | None = None) -> None:
     root = find_repo_root()
     config_path = Path(path) if path else (root / "config.json")
-    payload = {"voice_id": voice_id}
-    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    current = load_config(path)
+    if isinstance(update, dict):
+        current.update(update)
+    else:
+        current["voice_id"] = update
+    config_path.write_text(json.dumps(current, indent=2), encoding="utf-8")

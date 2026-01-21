@@ -6,7 +6,14 @@ import numpy as np
 from fish_speech.i18n import i18n
 from tools.agent_supervisor import SUPERVISOR
 from tools.audio_utils import build_device_choices, list_devices, sys_quick_check
-from tools.voice_collection import can_accept_more, clear_dataset, data_paths, load_manifest_stats, save_clip
+from tools.n8n_client import emit_event, set_config, test_connection
+from tools.voice_collection import (
+    can_accept_more,
+    clear_dataset,
+    data_paths,
+    load_manifest_stats,
+    save_clip,
+)
 from tools.voices import load_config, load_voices, save_config
 from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
 
@@ -40,21 +47,25 @@ def _collection_info() -> str:
     )
 
 
-def _on_collect_toggle(enabled: bool, state: dict | None) -> tuple[dict, str]:
+def _on_collect_toggle(enabled: bool, state: dict | None, send_events: bool):
     if not enabled:
-        return _init_collect_state(), _format_collect_status("OFF")
+        if send_events:
+            emit_event("collection_stopped", {})
+        return _init_collect_state(), _format_collect_status("OFF"), _collection_info()
     if state is None:
         state = _init_collect_state()
     ok, message = can_accept_more()
-    return state, _format_collect_status(message)
+    if send_events:
+        emit_event("collection_started", {})
+    return state, _format_collect_status(message), _collection_info()
 
 
-def _sync_collect_toggle(enabled: bool, state: dict | None):
-    state, status = _on_collect_toggle(enabled, state)
-    return enabled, enabled, state, status, _collection_info()
+def _sync_collect_toggle(enabled: bool, state: dict | None, send_events: bool):
+    state, status, info = _on_collect_toggle(enabled, state, send_events)
+    return enabled, enabled, state, status, info
 
 
-def _on_mic_stream(audio, enabled: bool, transcript: str, state: dict | None):
+def _on_mic_stream(audio, enabled: bool, transcript: str, state: dict | None, send_events: bool):
     if not enabled:
         return state or _init_collect_state(), _format_collect_status("OFF"), _collection_info()
     if audio is None:
@@ -92,8 +103,10 @@ def _on_mic_stream(audio, enabled: bool, transcript: str, state: dict | None):
 
         clip = state["buffer"][:clip_len]
         state["buffer"] = state["buffer"][clip_len:]
-        save_clip(clip, state["sample_rate"], transcript or None)
+        entry = save_clip(clip, state["sample_rate"], transcript or None)
         saved += 1
+        if send_events:
+            emit_event("collection_clip_saved", entry)
 
     ok, message = can_accept_more()
     if saved:
@@ -108,6 +121,9 @@ def _on_collect_clear(state: dict | None):
 
 def _start_agent(mic_idx, sys_idx, mode, takeover, autopilot):
     message = SUPERVISOR.start(mic_idx, sys_idx, mode)
+    emit_event("mode_changed", {"mode": mode})
+    emit_event("takeover_changed", {"enabled": takeover})
+    emit_event("autopilot_changed", {"enabled": autopilot})
     return _render_status(message, takeover, autopilot)
 
 
@@ -128,7 +144,7 @@ def _render_status(message: str | None, takeover: bool, autopilot: bool):
     warnings = status["warnings"][-5:]
     cfg = status["config"]
 
-    running = "ON" if status["running"] else "OFF"
+    running = "🟢 ON" if status["running"] else "⚪ OFF"
     header = f"Agente: {running} | PID: {status['pid'] or '-'}"
     mode = cfg.get("mode", "-")
     mic_idx = cfg.get("mic_idx", "-")
@@ -156,6 +172,62 @@ def _run_sys_check(sys_idx: int):
     )
 
 
+def _apply_n8n_settings(base_url, webhook_url, api_key, open_url, send_events: bool):
+    set_config(
+        base_url=base_url,
+        webhook_url=webhook_url,
+        api_key=api_key,
+        open_url=open_url,
+        enabled=send_events,
+    )
+    save_config(
+        {
+            "n8n_base_url": base_url,
+            "n8n_webhook_url": webhook_url,
+            "n8n_api_key": api_key,
+            "n8n_open_url": open_url,
+            "n8n_send_events": send_events,
+        }
+    )
+    if send_events:
+        emit_event("collection_status", {"enabled": send_events})
+    return _format_n8n_status("Configuracion actualizada")
+
+
+def _test_n8n_connection(base_url, webhook_url, api_key):
+    set_config(base_url=base_url, webhook_url=webhook_url, api_key=api_key)
+    ok, msg = test_connection()
+    return _format_n8n_status(msg if ok else f"ERROR: {msg}")
+
+
+def _format_n8n_status(message: str) -> str:
+    return f"N8N: {message}"
+
+
+def _format_open_link(url: str) -> str:
+    if not url:
+        return "Sin enlace configurado."
+    return f"[Abrir workflow]({url})"
+
+
+def _on_open_url_change(url: str) -> str:
+    save_config({"n8n_open_url": url})
+    return _format_open_link(url)
+
+
+def _on_voice_change(voice_id: str | None):
+    save_config({"voice_id": voice_id})
+    emit_event("voice_changed", {"voice_id": voice_id})
+
+
+def _on_mode_change(mode: str):
+    emit_event("mode_changed", {"mode": mode})
+
+
+def _on_toggle_change(name: str, enabled: bool):
+    emit_event(name, {"enabled": enabled})
+
+
 def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
     try:
         devices = list_devices()
@@ -174,8 +246,34 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
     config = load_config()
     default_voice = config.get("voice_id") if config.get("voice_id") in voice_map else None
 
+    n8n_base = config.get("n8n_base_url", "")
+    n8n_webhook = config.get("n8n_webhook_url", "")
+    n8n_api_key = config.get("n8n_api_key", "")
+    n8n_open = config.get("n8n_open_url", "")
+    n8n_send = bool(config.get("n8n_send_events", False))
+    set_config(
+        base_url=n8n_base,
+        webhook_url=n8n_webhook,
+        api_key=n8n_api_key,
+        open_url=n8n_open,
+        enabled=n8n_send,
+    )
+
     with gr.Blocks(theme=gr.themes.Base()) as app:
         gr.Markdown("# Agente Smith Control Panel")
+        gr.Markdown(
+            "Quick Start:\n"
+            "1) Inicia el agente (tab Agent)\n"
+            "2) Revisa dispositivos y SYS check (tab Listening)\n"
+            "3) Abre la URL local para usar el panel"
+        )
+        gr.Markdown("Comando rapido (CPU):")
+        quick_cmd = gr.Textbox(
+            value=r"C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.py --device cpu",
+            label="Run",
+            interactive=False,
+        )
+        copy_btn = gr.Button("Copy command")
         gr.Markdown(HEADER_MD)
 
         app.load(
@@ -199,17 +297,17 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                 )
                 takeover = gr.Checkbox(label="Takeover (mute agent / stop actions)", value=False)
                 autopilot = gr.Checkbox(label="Autopilot (agent actions enabled)", value=False)
+                collect_toggle_agent = gr.Checkbox(label="Send voice samples", value=False)
 
-                collect_toggle_agent = gr.Checkbox(label="Enviar muestras de voz", value=False)
-
-                status_panel = gr.Markdown("Agente: OFF")
+                status_panel = gr.Markdown("Agente: ⚪ OFF")
                 warnings_panel = gr.Markdown("(sin warnings)")
 
                 with gr.Row():
                     mic_lines = gr.Textbox(label="Ultimas transcripciones (MIC)", lines=6)
                     sys_lines = gr.Textbox(label="Ultimas transcripciones (SYS)", lines=6)
 
-                log_tail = gr.Textbox(label="Log tail", lines=10)
+                with gr.Accordion("Log tail", open=False):
+                    log_tail = gr.Textbox(label="Log tail", lines=10)
 
             with gr.Tab(label="Listening"):
                 mic_dev = gr.Dropdown(
@@ -222,6 +320,8 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                     choices=sys_choices,
                     value=default_sys,
                 )
+                if not mic_choices or not sys_choices:
+                    gr.Markdown("No se pudieron listar dispositivos de audio.")
                 sys_check_btn = gr.Button("Run quick SYS check (3s)")
                 sys_check_out = gr.Markdown("SYS_CHECK: pendiente")
 
@@ -257,68 +357,82 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                 collect_clear = gr.Button("Limpiar dataset")
                 collect_state = gr.State(_init_collect_state())
 
-        # Inference (kept for quick TTS testing)
-        with gr.Row():
-            text = gr.Textbox(
-                label=i18n("Input Text"), placeholder=TEXTBOX_PLACEHOLDER, lines=4
-            )
-            reference_id = gr.Textbox(label=i18n("Reference ID"), lines=1)
-            reference_audio = gr.Audio(label=i18n("Reference Audio"), type="filepath")
-            reference_text = gr.Textbox(label=i18n("Reference Text"), lines=1)
+            with gr.Tab(label="n8n"):
+                gr.Markdown(
+                    "Nota: para emitir eventos en tiempo real se requiere `N8N_WEBHOOK_URL`. "
+                    "Si solo usas BASE_URL + API_KEY, el test funciona pero el envio de eventos requiere webhook."
+                )
+                n8n_send_toggle = gr.Checkbox(label="Send events to n8n", value=n8n_send)
+                n8n_base_input = gr.Textbox(label="N8N_BASE_URL", value=n8n_base)
+                n8n_webhook_input = gr.Textbox(label="N8N_WEBHOOK_URL", value=n8n_webhook)
+                n8n_api_key_input = gr.Textbox(label="N8N_API_KEY", value=n8n_api_key, type="password")
+                n8n_open_input = gr.Textbox(label="Open n8n workflow (optional)", value=n8n_open)
+                n8n_open_link = gr.Markdown(_format_open_link(n8n_open))
+                n8n_status = gr.Markdown(_format_n8n_status("Sin configurar"))
+                n8n_test = gr.Button("Test connection")
 
-        with gr.Row():
-            max_new_tokens = gr.Slider(
-                label=i18n("Maximum tokens per batch, 0 means no limit"),
-                minimum=0,
-                maximum=2048,
-                value=0,
-                step=8,
-            )
-            chunk_length = gr.Slider(
-                label=i18n("Iterative Prompt Length, 0 means off"),
-                minimum=100,
-                maximum=400,
-                value=300,
-                step=8,
-            )
-            top_p = gr.Slider(
-                label="Top-P",
-                minimum=0.7,
-                maximum=0.95,
-                value=0.8,
-                step=0.01,
-            )
+        with gr.Accordion("TTS Quick Test", open=False):
+            with gr.Row():
+                text = gr.Textbox(
+                    label=i18n("Input Text"), placeholder=TEXTBOX_PLACEHOLDER, lines=4
+                )
+                reference_id = gr.Textbox(label=i18n("Reference ID"), lines=1)
+                reference_audio = gr.Audio(label=i18n("Reference Audio"), type="filepath")
+                reference_text = gr.Textbox(label=i18n("Reference Text"), lines=1)
 
-        with gr.Row():
-            repetition_penalty = gr.Slider(
-                label=i18n("Repetition Penalty"),
-                minimum=1,
-                maximum=1.2,
-                value=1.1,
-                step=0.01,
-            )
-            temperature = gr.Slider(
-                label="Temperature",
-                minimum=0.7,
-                maximum=1.0,
-                value=0.8,
-                step=0.01,
-            )
-            seed = gr.Number(
-                label="Seed",
-                info="0 means randomized inference, otherwise deterministic",
-                value=0,
-            )
-            use_memory_cache = gr.Radio(
-                label=i18n("Use Memory Cache"),
-                choices=["on", "off"],
-                value="on",
-            )
+            with gr.Row():
+                max_new_tokens = gr.Slider(
+                    label=i18n("Maximum tokens per batch, 0 means no limit"),
+                    minimum=0,
+                    maximum=2048,
+                    value=0,
+                    step=8,
+                )
+                chunk_length = gr.Slider(
+                    label=i18n("Iterative Prompt Length, 0 means off"),
+                    minimum=100,
+                    maximum=400,
+                    value=300,
+                    step=8,
+                )
+                top_p = gr.Slider(
+                    label="Top-P",
+                    minimum=0.7,
+                    maximum=0.95,
+                    value=0.8,
+                    step=0.01,
+                )
 
-        with gr.Row():
-            generate = gr.Button(value="\U0001f3a7 " + i18n("Generate"), variant="primary")
-            error = gr.HTML(label=i18n("Error Message"))
-            audio = gr.Audio(label=i18n("Generated Audio"), type="numpy")
+            with gr.Row():
+                repetition_penalty = gr.Slider(
+                    label=i18n("Repetition Penalty"),
+                    minimum=1,
+                    maximum=1.2,
+                    value=1.1,
+                    step=0.01,
+                )
+                temperature = gr.Slider(
+                    label="Temperature",
+                    minimum=0.7,
+                    maximum=1.0,
+                    value=0.8,
+                    step=0.01,
+                )
+                seed = gr.Number(
+                    label="Seed",
+                    info="0 means randomized inference, otherwise deterministic",
+                    value=0,
+                )
+                use_memory_cache = gr.Radio(
+                    label=i18n("Use Memory Cache"),
+                    choices=["on", "off"],
+                    value="on",
+                )
+
+            with gr.Row():
+                generate = gr.Button(value="\U0001f3a7 " + i18n("Generate"), variant="primary")
+                error = gr.HTML(label=i18n("Error Message"))
+                audio = gr.Audio(label=i18n("Generated Audio"), type="numpy")
 
         generate.click(
             inference_fct,
@@ -362,11 +476,18 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
             outputs=[sys_check_out],
         )
 
-        voice_select.change(save_config, inputs=[voice_select], outputs=[])
+        voice_select.change(
+            _on_voice_change,
+            inputs=[voice_select],
+            outputs=[],
+        )
+        mode.change(_on_mode_change, inputs=[mode], outputs=[])
+        takeover.change(lambda v: _on_toggle_change("takeover_changed", v), inputs=[takeover], outputs=[])
+        autopilot.change(lambda v: _on_toggle_change("autopilot_changed", v), inputs=[autopilot], outputs=[])
 
         collect_toggle_agent.change(
             _sync_collect_toggle,
-            inputs=[collect_toggle_agent, collect_state],
+            inputs=[collect_toggle_agent, collect_state, n8n_send_toggle],
             outputs=[
                 collect_toggle_agent,
                 collect_toggle_main,
@@ -377,7 +498,7 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
         )
         collect_toggle_main.change(
             _sync_collect_toggle,
-            inputs=[collect_toggle_main, collect_state],
+            inputs=[collect_toggle_main, collect_state, n8n_send_toggle],
             outputs=[
                 collect_toggle_agent,
                 collect_toggle_main,
@@ -388,13 +509,43 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
         )
         mic_stream.stream(
             _on_mic_stream,
-            inputs=[mic_stream, collect_toggle_main, collect_transcript, collect_state],
+            inputs=[mic_stream, collect_toggle_main, collect_transcript, collect_state, n8n_send_toggle],
             outputs=[collect_state, collect_status, collect_info],
         )
         collect_clear.click(
             _on_collect_clear,
             inputs=[collect_state],
             outputs=[collect_state, collect_status, collect_info],
+        )
+
+        n8n_open_input.change(
+            _on_open_url_change,
+            inputs=[n8n_open_input],
+            outputs=[n8n_open_link],
+        )
+        n8n_test.click(
+            _test_n8n_connection,
+            inputs=[n8n_base_input, n8n_webhook_input, n8n_api_key_input],
+            outputs=[n8n_status],
+        )
+        n8n_send_toggle.change(
+            _apply_n8n_settings,
+            inputs=[n8n_base_input, n8n_webhook_input, n8n_api_key_input, n8n_open_input, n8n_send_toggle],
+            outputs=[n8n_status],
+        )
+
+        copy_btn.click(
+            fn=None,
+            inputs=[quick_cmd],
+            outputs=[],
+            js="(txt)=>{navigator.clipboard.writeText(txt);}",
+        )
+
+        status_timer = gr.Timer(2.0)
+        status_timer.tick(
+            _refresh_status,
+            inputs=[takeover, autopilot],
+            outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )
 
     return app

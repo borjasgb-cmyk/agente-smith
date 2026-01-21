@@ -80,6 +80,7 @@ def parse_args():
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--max-gradio-length", type=int, default=0)
     parser.add_argument("--theme", type=str, default="light")
+    parser.add_argument("--server-port", type=int, default=7862)
 
     return parser.parse_args()
 
@@ -89,6 +90,25 @@ if __name__ == "__main__":
     args = parse_args()
     _check_checkpoints(args.llama_checkpoint_path, args.decoder_checkpoint_path)
     args.precision = torch.half if args.half else torch.bfloat16
+
+    if os.environ.get("FISH_SMOKE_UI") == "1":
+        logger.info("Smoke mode enabled, skipping model load.")
+
+        def _dummy_infer(*_args, **_kwargs):
+            return None, "Smoke mode"
+
+        print(f"* Running on local URL:  http://127.0.0.1:{args.server_port}")
+        app = build_app(_dummy_infer, args.theme)
+        try:
+            app.launch(server_port=args.server_port)
+        except OSError as exc:
+            msg = str(exc)
+            if "address already in use" in msg.lower():
+                print(f"ERROR: puerto {args.server_port} en uso.")
+            else:
+                print(f"ERROR: no se pudo iniciar la UI: {exc}")
+            raise SystemExit(1)
+        raise SystemExit(0)
 
     if args.device == "auto":
         if torch.backends.mps.is_available():
@@ -129,33 +149,45 @@ if __name__ == "__main__":
         precision=args.precision,
     )
 
-    # Dry run to check if the model is loaded correctly and avoid the first-time latency
-    list(
-        inference_engine.inference(
-            ServeTTSRequest(
-                text="Hello world.",
-                references=[],
-                reference_id=None,
-                max_new_tokens=1024,
-                chunk_length=200,
-                top_p=0.7,
-                repetition_penalty=1.5,
-                temperature=0.7,
-                format="wav",
+    if os.environ.get("FISH_SKIP_WARMUP") != "1":
+        # Dry run to check if the model is loaded correctly and avoid the first-time latency
+        list(
+            inference_engine.inference(
+                ServeTTSRequest(
+                    text="Hello world.",
+                    references=[],
+                    reference_id=None,
+                    max_new_tokens=1024,
+                    chunk_length=200,
+                    top_p=0.7,
+                    repetition_penalty=1.5,
+                    temperature=0.7,
+                    format="wav",
+                )
             )
         )
-    )
 
     logger.info("Warming up done, launching the web UI...")
 
     # Get the inference function with the immutable arguments
-    valid_voices, invalid_voices = load_voices()
+    valid_voices, _invalid_voices = load_voices()
     voice_map = {voice["id"]: voice for voice in valid_voices}
-    config = load_config()
     inference_fct = get_inference_wrapper_with_voices(inference_engine, voice_map)
 
     app = build_app(
         inference_fct,
         args.theme,
     )
-    app.launch()
+    try:
+        app.launch(server_port=args.server_port)
+    except OSError as exc:
+        msg = str(exc)
+        if "address already in use" in msg.lower():
+            print(f"ERROR: puerto {args.server_port} en uso.")
+            print("Prueba con otro puerto, por ejemplo:")
+            print(
+                f"{EXPECTED_PYTHON} tools\\run_webui.py --device {args.device} --server-port 7863"
+            )
+        else:
+            print(f"ERROR: no se pudo iniciar la UI: {exc}")
+        raise SystemExit(1)
