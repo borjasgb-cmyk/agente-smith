@@ -1,1 +1,42 @@
-[]
+[
+  {
+    "id": "arnau_es",
+    "name": "Arnau (es-ES)",
+    "gender": "male",
+    "accent": "es-ES",
+    "type": "preset",
+    "model_path": "data/voices/arnau_es/model.pth",
+    "ref_audio": "data/voices/arnau_es/ref.wav",
+    "enabled": true
+  },
+  {
+    "id": "dario_es",
+    "name": "Dario (es-ES)",
+    "gender": "male",
+    "accent": "es-ES",
+    "type": "preset",
+    "model_path": "data/voices/dario_es/model.pth",
+    "ref_audio": "data/voices/dario_es/ref.wav",
+    "enabled": true
+  },
+  {
+    "id": "abril_es",
+    "name": "Abril (es-ES)",
+    "gender": "female",
+    "accent": "es-ES",
+    "type": "preset",
+    "model_path": "data/voices/abril_es/model.pth",
+    "ref_audio": "data/voices/abril_es/ref.wav",
+    "enabled": true
+  },
+  {
+    "id": "estrella_es",
+    "name": "Estrella (es-ES)",
+    "gender": "female",
+    "accent": "es-ES",
+    "type": "preset",
+    "model_path": "data/voices/estrella_es/model.pth",
+    "ref_audio": "data/voices/estrella_es/ref.wav",
+    "enabled": true
+  }
+]

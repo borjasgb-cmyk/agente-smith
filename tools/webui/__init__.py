@@ -1,8 +1,6 @@
 from typing import Callable
 
 import gradio as gr
-import numpy as np
-
 from fish_speech.i18n import i18n
 from tools.agent_supervisor import SUPERVISOR
 from tools.audio_utils import (
@@ -13,11 +11,11 @@ from tools.audio_utils import (
 )
 from tools.n8n_client import emit_event, set_config, test_connection
 from tools.voice_collection import (
-    can_accept_more,
     clear_dataset,
     data_paths,
     load_manifest_stats,
-    save_clip,
+    start_collection,
+    stop_collection,
 )
 from tools.voices import load_config, load_voices, save_config
 from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
@@ -30,12 +28,19 @@ def _format_invalid_voices(invalid_voices: list[dict]) -> str:
     for voice in invalid_voices:
         name = voice.get("name") or voice.get("id") or "<unknown>"
         reason = voice.get("reason", "motivo desconocido")
+        if "not found" in reason or "ref_audio not found" in reason or "model_path not found" in reason:
+            reason = "Not configured (missing files)"
         lines.append(f"- {name}: {reason}")
     return "\n".join(lines)
 
 
-def _init_collect_state() -> dict:
-    return {"buffer": None, "sample_rate": None}
+def _format_available_voices(valid_voices: list[dict]) -> str:
+    if not valid_voices:
+        return "No hay voces disponibles."
+    lines = ["Voces disponibles:"]
+    for voice in valid_voices:
+        lines.append(f"- {voice['name']} ({voice['id']})")
+    return "\n".join(lines)
 
 
 def _format_collect_status(message: str) -> str:
@@ -52,93 +57,71 @@ def _collection_info() -> str:
     )
 
 
-def _on_collect_toggle(enabled: bool, state: dict | None, send_events: bool):
+def _emit_collection_stats(send_events: bool) -> None:
+    if not send_events:
+        return
+    count, seconds = load_manifest_stats()
+    emit_event("collection_stats", {"clips": count, "seconds": int(seconds)})
+
+
+def _refresh_collection_stats(last_count: int, last_seconds: int, send_events: bool):
+    count, seconds = load_manifest_stats()
+    seconds_int = int(seconds)
+    if send_events and (count != last_count or seconds_int != last_seconds):
+        emit_event("collection_stats", {"clips": count, "seconds": seconds_int})
+    return _collection_info(), count, seconds_int
+
+
+def _on_collect_toggle(enabled: bool, mic_idx: int | None, send_events: bool):
     if not enabled:
+        ok, message = stop_collection()
         if send_events:
-            emit_event("collection_stopped", {})
-        return _init_collect_state(), _format_collect_status("OFF"), _collection_info()
-    if state is None:
-        state = _init_collect_state()
-    ok, message = can_accept_more()
+            emit_event("collection_stopped", {"message": message})
+            _emit_collection_stats(send_events)
+        return _format_collect_status(message), _collection_info()
+
+    ok, message = start_collection(mic_idx)
     if send_events:
-        emit_event("collection_started", {})
-    return state, _format_collect_status(message), _collection_info()
+        emit_event("collection_started", {"mic_idx": mic_idx, "message": message})
+        _emit_collection_stats(send_events)
+    return _format_collect_status(message), _collection_info()
 
 
-def _on_mic_stream(audio, enabled: bool, transcript: str, state: dict | None, send_events: bool):
-    if not enabled:
-        return state or _init_collect_state(), _format_collect_status("OFF"), _collection_info()
-    if audio is None:
-        return state or _init_collect_state(), _format_collect_status("Sin audio"), _collection_info()
-
-    sample_rate, data = audio
-    if data is None:
-        return state or _init_collect_state(), _format_collect_status("Sin audio"), _collection_info()
-
-    if state is None:
-        state = _init_collect_state()
-
-    data = np.asarray(data, dtype=np.float32)
-    if data.ndim == 2:
-        data = data.mean(axis=1)
-
-    if state["sample_rate"] is None:
-        state["sample_rate"] = int(sample_rate)
-        state["buffer"] = data
-    else:
-        state["buffer"] = (
-            data
-            if state["buffer"] is None
-            else np.concatenate([state["buffer"], data], axis=0)
-        )
-
-    clip_seconds = 5.0
-    clip_len = int(clip_seconds * state["sample_rate"])
-    saved = 0
-
-    while state["buffer"] is not None and state["buffer"].shape[0] >= clip_len:
-        ok, message = can_accept_more()
-        if not ok:
-            return state, _format_collect_status(message), _collection_info()
-
-        clip = state["buffer"][:clip_len]
-        state["buffer"] = state["buffer"][clip_len:]
-        entry = save_clip(clip, state["sample_rate"], transcript or None)
-        saved += 1
-        if send_events:
-            emit_event("collection_clip_saved", entry)
-
-    ok, message = can_accept_more()
-    if saved:
-        return state, _format_collect_status(f"Guardados: {saved}. {message}"), _collection_info()
-    return state, _format_collect_status(message), _collection_info()
-
-
-def _on_collect_clear(state: dict | None, confirm: bool):
+def _on_collect_clear(confirm: bool, send_events: bool):
     if not confirm:
-        return state or _init_collect_state(), _format_collect_status("Confirma la limpieza"), _collection_info()
+        return _format_collect_status("Confirma la limpieza"), _collection_info()
+    stop_collection()
     clear_dataset()
-    return _init_collect_state(), _format_collect_status("Dataset limpio"), _collection_info()
+    if send_events:
+        emit_event("collection_cleared", {})
+        _emit_collection_stats(send_events)
+    return _format_collect_status("Dataset limpio"), _collection_info()
 
 
-def _start_agent(mic_idx, sys_idx, mode, takeover, autopilot, device_label: str):
+def _start_agent(mic_idx, sys_idx, mode, takeover, device_label: str):
     message = SUPERVISOR.start(mic_idx, sys_idx, mode)
     emit_event("mode_changed", {"mode": mode})
     emit_event("takeover_changed", {"enabled": takeover})
-    emit_event("autopilot_changed", {"enabled": autopilot})
-    return _render_status(message, takeover, autopilot, device_label)
+    emit_event("agent_state", {"running": True, "message": message})
+    return _render_status(message, takeover, device_label)
 
 
-def _stop_agent(takeover, autopilot, device_label: str):
+def _stop_agent(takeover, device_label: str):
     message = SUPERVISOR.stop()
-    return _render_status(message, takeover, autopilot, device_label)
+    emit_event("agent_state", {"running": False, "message": message})
+    return _render_status(message, takeover, device_label)
 
 
-def _refresh_status(takeover, autopilot, device_label: str):
-    return _render_status(None, takeover, autopilot, device_label)
+def _refresh_status(takeover, device_label: str):
+    return _render_status(None, takeover, device_label)
 
 
-def _render_status(message: str | None, takeover: bool, autopilot: bool, device_label: str):
+def _set_takeover(enabled: bool, device_label: str):
+    emit_event("takeover_changed", {"enabled": enabled})
+    return enabled, *_render_status(None, enabled, device_label)
+
+
+def _render_status(message: str | None, takeover: bool, device_label: str):
     status = SUPERVISOR.status()
     lines = status["lines"][-12:]
     mic_lines = status["mic_lines"][-5:]
@@ -152,7 +135,7 @@ def _render_status(message: str | None, takeover: bool, autopilot: bool, device_
     mic_idx = cfg.get("mic_idx", "-")
     sys_idx = cfg.get("sys_idx", "-")
     flags = f"Modo: {mode} | MIC: {mic_idx} | SYS: {sys_idx}"
-    state_line = f"Takeover: {'ON' if takeover else 'OFF'} | Autopilot: {'ON' if autopilot else 'OFF'}"
+    state_line = f"Takeover: {'ON' if takeover else 'OFF'}"
     if message:
         header = f"{header} | {message}"
 
@@ -174,9 +157,10 @@ def _run_sys_check(sys_idx: int):
         emit_event("warning", {"type": "sys_silent", "sys_idx": sys_idx})
         SUPERVISOR.add_warning(f"SYS silent on device {sys_idx}")
         guidance = (
-            "SILENT: routea Chrome/Aircall a VB-Audio Virtual Cable "
-            "(Altavoces (3- VB-Audio Virtual Cable) o CABLE In 16 Ch) "
-            "en el Volume Mixer."
+            "SILENT: 1) Windows Volume Mixer: set Chrome/Aircall output to "
+            "'Altavoces (3- VB-Audio Virtual Cable)' o 'CABLE In 16 Ch'. "
+            "2) Control Panel > Sound > Recording > CABLE Output > Listen "
+            "> 'Listen to this device' > Playback through Razer (BT)."
         )
         return f"{base}\n{guidance}"
     return base
@@ -205,33 +189,37 @@ def _run_bleed_check(mic_idx: int, sys_idx: int):
     return base
 
 
-def _apply_n8n_settings(webhook_url, open_url, send_events: bool):
+def _apply_n8n_settings(webhook_url, base_url, api_key, open_url, send_events: bool):
     set_config(
+        base_url=base_url,
         webhook_url=webhook_url,
+        api_key=api_key,
         open_url=open_url,
         enabled=send_events,
     )
     save_config(
         {
+            "n8n_base_url": base_url,
             "n8n_webhook_url": webhook_url,
+            "n8n_api_key": api_key,
             "n8n_open_url": open_url,
             "n8n_send_events": send_events,
         }
     )
-    if send_events:
-        emit_event("collection_status", {"enabled": send_events})
-    return _format_n8n_status(webhook_url)
+    return _format_n8n_status(webhook_url, base_url)
 
 
-def _test_n8n_connection(webhook_url):
-    set_config(webhook_url=webhook_url)
+def _test_n8n_connection(webhook_url, base_url, api_key):
+    set_config(webhook_url=webhook_url, base_url=base_url, api_key=api_key)
     ok, msg = test_connection()
     status = "OK" if ok else f"ERROR: {msg}"
     return f"n8n test: {status}"
 
 
-def _format_n8n_status(webhook_url: str) -> str:
+def _format_n8n_status(webhook_url: str, base_url: str | None = None) -> str:
     if not webhook_url:
+        if base_url:
+            return "n8n: rest configured (webhook required for events)"
         return "n8n: not configured"
     return f"n8n: webhook ready ({webhook_url})"
 
@@ -247,17 +235,18 @@ def _on_open_url_change(url: str) -> str:
     return _format_open_link(url)
 
 
-def _on_voice_change(voice_id: str | None):
+def _on_voice_change(voice_id: str | None, valid_ids: set[str], invalid_ids: set[str]):
     save_config({"voice_id": voice_id})
-    emit_event("voice_changed", {"voice_id": voice_id})
+    emit_event("voice_selected", {"voice_id": voice_id})
+    if voice_id in invalid_ids:
+        return "Selected voice is not configured yet."
+    if voice_id in valid_ids:
+        return "Voice ready."
+    return "No voice selected."
 
 
 def _on_mode_change(mode: str):
     emit_event("mode_changed", {"mode": mode})
-
-
-def _on_toggle_change(name: str, enabled: bool):
-    emit_event(name, {"enabled": enabled})
 
 
 def build_app(inference_fct: Callable, theme: str = "light", device_label: str = "CPU") -> gr.Blocks:
@@ -267,28 +256,47 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
         devices = []
     mic_choices = build_device_choices(devices, "input")
     sys_choices = build_device_choices(devices, "input")
+    mic_label_map = {idx: label for label, idx in mic_choices}
     default_mic = mic_choices[0][1] if mic_choices else None
     default_sys = sys_choices[0][1] if sys_choices else None
 
     valid_voices, invalid_voices = load_voices()
     voice_map = {voice["id"]: voice for voice in valid_voices}
+    valid_ids = set(voice_map.keys())
+    invalid_ids = {voice.get("id") for voice in invalid_voices if voice.get("id")}
     voice_choices = [
         (f'{voice["name"]} ({voice["id"]})', voice["id"]) for voice in valid_voices
     ]
+    for voice in invalid_voices:
+        vid = voice.get("id")
+        name = voice.get("name") or vid
+        if not vid:
+            continue
+        voice_choices.append((f"{name} ({vid}) [Not configured]", vid))
     config = load_config()
-    default_voice = config.get("voice_id") if config.get("voice_id") in voice_map else None
+    default_voice = config.get("voice_id") if config.get("voice_id") in (valid_ids | invalid_ids) else None
+    if default_voice in valid_ids:
+        voice_status_text = "Voice ready."
+    elif default_voice in invalid_ids:
+        voice_status_text = "Selected voice is not configured yet."
+    else:
+        voice_status_text = "No voice selected."
 
     n8n_webhook = config.get("n8n_webhook_url") or "http://localhost:5678/webhook/Transcripcion"
+    n8n_base = config.get("n8n_base_url", "")
+    n8n_api_key = config.get("n8n_api_key", "")
     n8n_open = config.get("n8n_open_url", "")
     n8n_send = bool(config.get("n8n_send_events", False))
     set_config(
+        base_url=n8n_base,
         webhook_url=n8n_webhook,
+        api_key=n8n_api_key,
         open_url=n8n_open,
         enabled=n8n_send,
     )
 
     with gr.Blocks(theme=gr.themes.Base()) as app:
-        gr.Markdown("# Agente Smith Control Panel")
+        gr.Markdown("# AgenteSmith Panel")
         gr.Markdown("Device: " + device_label)
         gr.Markdown(
             "Quick Start:\n"
@@ -329,10 +337,13 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
                     choices=["MIC only", "SYS only", "MIC+SYS"],
                     value="MIC+SYS",
                 )
-                takeover = gr.Checkbox(label="Takeover (mute agent / stop actions)", value=False)
-                autopilot = gr.Checkbox(label="Autopilot (agent actions enabled)", value=False)
                 status_panel = gr.Markdown("Agente: OFF")
                 warnings_panel = gr.Markdown("(sin warnings)")
+
+                with gr.Row():
+                    take_over_btn = gr.Button("Take Over")
+                    resume_btn = gr.Button("Resume")
+                takeover_state = gr.State(False)
 
                 with gr.Row():
                     mic_lines = gr.Textbox(label="Ultimas transcripciones (MIC)", lines=6)
@@ -352,54 +363,64 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
                     choices=sys_choices,
                     value=default_sys,
                 )
+                gr.Markdown(
+                    "SYS routing: Windows Volume Mixer -> Chrome/Aircall output to "
+                    "'Altavoces (3- VB-Audio Virtual Cable)' o 'CABLE In 16 Ch'."
+                )
                 if not mic_choices or not sys_choices:
                     gr.Markdown("No se pudieron listar dispositivos de audio.")
                 sys_check_btn = gr.Button("Run quick SYS check (3s)")
                 sys_check_out = gr.Markdown("SYS_CHECK: pendiente")
-                bleed_check_btn = gr.Button("Run MIC/SYS bleed check (3s + 3s)")
+                bleed_check_btn = gr.Button("Run MIC bleed check (speak 3s)")
                 bleed_check_out = gr.Markdown("BLEED_CHECK: pendiente")
 
             with gr.Tab(label="Voices"):
+                gr.Markdown(_format_available_voices(valid_voices))
+                gr.Markdown(
+                    "To enable a voice, place a clean 10-30s WAV at the ref_audio path."
+                )
+                voice_status = gr.Markdown(voice_status_text)
                 voice_select = gr.Dropdown(
                     label="Voz",
                     choices=voice_choices,
                     value=default_voice,
                     interactive=bool(voice_choices),
                 )
-                with gr.Accordion("Voces no disponibles", open=False):
+                with gr.Accordion("Not configured / invalid voices", open=False):
                     gr.Markdown(_format_invalid_voices(invalid_voices))
 
             with gr.Tab(label="n8n"):
                 gr.Markdown("Webhook-only. Configura `N8N_WEBHOOK_URL` para recibir eventos.")
                 n8n_send_toggle = gr.Checkbox(label="Send events to n8n", value=n8n_send)
                 n8n_webhook_input = gr.Textbox(label="N8N_WEBHOOK_URL", value=n8n_webhook)
+                with gr.Accordion("REST optional", open=False):
+                    n8n_base_input = gr.Textbox(label="N8N_BASE_URL", value=n8n_base)
+                    n8n_api_key_input = gr.Textbox(label="N8N_API_KEY", value=n8n_api_key, type="password")
                 n8n_open_input = gr.Textbox(label="Open n8n workflow (optional)", value=n8n_open)
                 n8n_open_link = gr.Markdown(_format_open_link(n8n_open))
-                n8n_status = gr.Markdown(_format_n8n_status(n8n_webhook))
-                n8n_test = gr.Button("Test connection")
+                n8n_status = gr.Markdown(_format_n8n_status(n8n_webhook, n8n_base))
+                n8n_test = gr.Button("Test webhook")
 
             with gr.Tab(label="Voice Collection"):
                 gr.Markdown(
+                    "Only record your own microphone with consent. Do not record third parties."
+                )
+                gr.Markdown(
                     "Recolecta clips del micro en segundo plano. "
-                    "Activa el toggle y empieza a grabar en el mic."
+                    "Activa el toggle y empieza a hablar."
                 )
                 collect_toggle = gr.Checkbox(
-                    label="Recolectar muestras (MIC)", value=False
-                )
-                collect_transcript = gr.Textbox(
-                    label="Transcripcion (opcional)", lines=1, value=""
+                    label="Collect samples (MIC)", value=False
                 )
                 collect_status = gr.Markdown(_format_collect_status("OFF"))
                 collect_info = gr.Markdown(_collection_info())
-                mic_stream = gr.Audio(
-                    label="Mic Stream",
-                    sources=["microphone"],
-                    type="numpy",
-                    streaming=True,
-                )
+                count_init, seconds_init = load_manifest_stats()
+                collect_count_state = gr.State(int(count_init))
+                collect_seconds_state = gr.State(int(seconds_init))
+                initial_mic_label = f"MIC device: {mic_label_map.get(default_mic, '-')}"
+                collect_mic_label = gr.Markdown(initial_mic_label)
                 confirm_clear = gr.Checkbox(label="Confirmar limpieza", value=False)
                 collect_clear = gr.Button("Limpiar dataset")
-                collect_state = gr.State(_init_collect_state())
 
         with gr.Accordion("TTS Quick Test", open=False):
             with gr.Row():
@@ -485,18 +506,18 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
         )
 
         start_btn.click(
-            lambda mic, sys, m, t, a: _start_agent(mic, sys, m, t, a, device_label),
-            inputs=[mic_dev, sys_dev, mode, takeover, autopilot],
+            lambda mic, sys, m, t: _start_agent(mic, sys, m, t, device_label),
+            inputs=[mic_dev, sys_dev, mode, takeover_state],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )
         stop_btn.click(
-            lambda t, a: _stop_agent(t, a, device_label),
-            inputs=[takeover, autopilot],
+            lambda t: _stop_agent(t, device_label),
+            inputs=[takeover_state],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )
         refresh_btn.click(
-            lambda t, a: _refresh_status(t, a, device_label),
-            inputs=[takeover, autopilot],
+            lambda t: _refresh_status(t, device_label),
+            inputs=[takeover_state],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )
 
@@ -510,30 +531,38 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
             inputs=[mic_dev, sys_dev],
             outputs=[bleed_check_out],
         )
+        mic_dev.change(
+            lambda idx: f"MIC device: {mic_label_map.get(idx, '-')}",
+            inputs=[mic_dev],
+            outputs=[collect_mic_label],
+        )
 
         voice_select.change(
-            _on_voice_change,
+            lambda vid: _on_voice_change(vid, valid_ids, invalid_ids),
             inputs=[voice_select],
-            outputs=[],
+            outputs=[voice_status],
         )
         mode.change(_on_mode_change, inputs=[mode], outputs=[])
-        takeover.change(lambda v: _on_toggle_change("takeover_changed", v), inputs=[takeover], outputs=[])
-        autopilot.change(lambda v: _on_toggle_change("autopilot_changed", v), inputs=[autopilot], outputs=[])
+        take_over_btn.click(
+            lambda: _set_takeover(True, device_label),
+            inputs=[],
+            outputs=[takeover_state, status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
+        )
+        resume_btn.click(
+            lambda: _set_takeover(False, device_label),
+            inputs=[],
+            outputs=[takeover_state, status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
+        )
 
         collect_toggle.change(
             _on_collect_toggle,
-            inputs=[collect_toggle, collect_state, n8n_send_toggle],
-            outputs=[collect_state, collect_status, collect_info],
-        )
-        mic_stream.stream(
-            _on_mic_stream,
-            inputs=[mic_stream, collect_toggle, collect_transcript, collect_state, n8n_send_toggle],
-            outputs=[collect_state, collect_status, collect_info],
+            inputs=[collect_toggle, mic_dev, n8n_send_toggle],
+            outputs=[collect_status, collect_info],
         )
         collect_clear.click(
             _on_collect_clear,
-            inputs=[collect_state, confirm_clear],
-            outputs=[collect_state, collect_status, collect_info],
+            inputs=[confirm_clear, n8n_send_toggle],
+            outputs=[collect_status, collect_info],
         )
 
         n8n_open_input.change(
@@ -543,17 +572,17 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
         )
         n8n_webhook_input.change(
             _apply_n8n_settings,
-            inputs=[n8n_webhook_input, n8n_open_input, n8n_send_toggle],
+            inputs=[n8n_webhook_input, n8n_base_input, n8n_api_key_input, n8n_open_input, n8n_send_toggle],
             outputs=[n8n_status],
         )
         n8n_test.click(
             _test_n8n_connection,
-            inputs=[n8n_webhook_input],
+            inputs=[n8n_webhook_input, n8n_base_input, n8n_api_key_input],
             outputs=[n8n_status],
         )
         n8n_send_toggle.change(
             _apply_n8n_settings,
-            inputs=[n8n_webhook_input, n8n_open_input, n8n_send_toggle],
+            inputs=[n8n_webhook_input, n8n_base_input, n8n_api_key_input, n8n_open_input, n8n_send_toggle],
             outputs=[n8n_status],
         )
 
@@ -566,9 +595,16 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
 
         status_timer = gr.Timer(2.0)
         status_timer.tick(
-            lambda t, a: _refresh_status(t, a, device_label),
-            inputs=[takeover, autopilot],
+            lambda t: _refresh_status(t, device_label),
+            inputs=[takeover_state],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
+        )
+
+        collect_timer = gr.Timer(3.0)
+        collect_timer.tick(
+            _refresh_collection_stats,
+            inputs=[collect_count_state, collect_seconds_state, n8n_send_toggle],
+            outputs=[collect_info, collect_count_state, collect_seconds_state],
         )
 
     return app

@@ -51,11 +51,23 @@ def _checkpoint_paths() -> tuple[Path, Path]:
 
 
 def _check_checkpoints(llama_path: Path, decoder_path: Path) -> None:
-    if llama_path.exists() and decoder_path.exists():
+    required = [
+        "config.json",
+        "model.pth",
+        "codec.pth",
+        "tokenizer.tiktoken",
+    ]
+    missing = []
+    for name in required:
+        if not (llama_path / name).exists():
+            missing.append(name)
+    if decoder_path.exists() and not missing:
         return
-    print("ERROR: checkpoints not found.")
+    print("ERROR: checkpoints not found or incomplete.")
     print(f"Llama path:   {llama_path}")
     print(f"Decoder path: {decoder_path}")
+    if missing:
+        print("Missing files: " + ", ".join(missing))
     print("Set FISH_CHECKPOINT_DIR or create a symlink:")
     print(r"  mklink /D checkpoints C:\Users\Usuario\fish-speech\checkpoints")
     raise SystemExit(1)

@@ -82,7 +82,7 @@ $content = ""
 if (Test-Path $log) { $content += Get-Content $log -Raw }
 if (Test-Path $logErr) { $content += Get-Content $logErr -Raw }
 if ($content -match "Running on local URL") {
-    Write-Host "OK: WebUI arranco en $port"
+    Write-Host "OK: WebUI arranco en http://127.0.0.1:$port"
     $proc.Kill()
     exit 0
 }
