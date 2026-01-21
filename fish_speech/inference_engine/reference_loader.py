@@ -31,7 +31,8 @@ class ReferenceLoader:
         self.encode_reference: Callable
 
         # Define the torchaudio backend
-        backends = torchaudio.list_audio_backends()
+        list_backends = getattr(torchaudio, "list_audio_backends", None)
+        backends = list_backends() if callable(list_backends) else []
         if "ffmpeg" in backends:
             self.backend = "ffmpeg"
         else:

@@ -611,7 +611,7 @@ def build_app(
             with gr.Tab(label="Chat"):
                 gr.Markdown("Press to talk. Speech is recorded from the selected MIC device.")
                 chat_record_state = gr.State(False)
-                ptt_btn = gr.Button("Push-to-Talk", variant="primary")
+                ptt_btn = gr.Button("Push-to-Talk (click to start/stop)", variant="primary")
                 chat_status = gr.Markdown("Idle")
                 chat_transcript = gr.Textbox(label="Transcripcion", lines=4)
                 chat_reply = gr.Textbox(label="Respuesta", lines=4)

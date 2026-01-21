@@ -8,7 +8,7 @@ import webbrowser
 from pathlib import Path
 
 
-def _wait_port(host: str, port: int, timeout: float = 10.0) -> bool:
+def _wait_port(host: str, port: int, timeout: float = 120.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -37,7 +37,8 @@ def main() -> int:
         except Exception:
             webbrowser.open(url)
     else:
-        print("WARNING: panel did not start in time.")
+        print("WARNING: panel did not start in time. Opening anyway.")
+        webbrowser.open(url)
     return proc.wait()
 
 
