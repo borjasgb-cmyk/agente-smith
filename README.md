@@ -28,6 +28,26 @@ Selftest (lista dispositivos, beep y arranque de 5s):
 powershell -ExecutionPolicy Bypass -File tools\selftest.ps1
 ```
 
+### Recolectar muestras (MIC)
+
+En la UI hay un toggle **Recolectar muestras (MIC)**. Cuando esta ON, guarda clips de 5s en `data/voice_user/raw/` y escribe `data/voice_user/manifest.jsonl` con `path`, `duration`, `rms`, `peak` y `transcript` si se ingresa.
+
+Limites: maximo 200 clips o 30 minutos.
+
+Boton **Limpiar dataset** borra los clips y el manifest.
+
+### WebUI (venv y checkpoints)
+
+Ejecuta siempre con el Python del venv.
+
+Si los checkpoints estan en otra ruta, define `FISH_CHECKPOINT_DIR`.
+
+Ejemplo PowerShell:
+```powershell
+$env:FISH_CHECKPOINT_DIR = "C:\Users\Usuario\fish-speech\checkpoints"
+C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.py
+```
+
 Arranque del agente:
 ```powershell
 C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe AgenteSmith.py

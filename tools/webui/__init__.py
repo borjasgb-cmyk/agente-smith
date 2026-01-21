@@ -1,9 +1,81 @@
 from typing import Callable
 
+import numpy as np
+
 import gradio as gr
 
 from fish_speech.i18n import i18n
+from tools.voice_collection import can_accept_more, clear_dataset, save_clip
 from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
+
+
+def _init_collect_state() -> dict:
+    return {"buffer": None, "sample_rate": None}
+
+
+def _format_collect_status(message: str) -> str:
+    return f"Estado: {message}"
+
+
+def _on_collect_toggle(enabled: bool, state: dict | None) -> tuple[dict, str]:
+    if not enabled:
+        return _init_collect_state(), _format_collect_status("OFF")
+    if state is None:
+        state = _init_collect_state()
+    ok, message = can_accept_more()
+    return state, _format_collect_status(message)
+
+
+def _on_mic_stream(audio, enabled: bool, transcript: str, state: dict | None):
+    if not enabled:
+        return state or _init_collect_state(), _format_collect_status("OFF")
+    if audio is None:
+        return state or _init_collect_state(), _format_collect_status("Sin audio")
+
+    sample_rate, data = audio
+    if data is None:
+        return state or _init_collect_state(), _format_collect_status("Sin audio")
+
+    if state is None:
+        state = _init_collect_state()
+
+    data = np.asarray(data, dtype=np.float32)
+    if data.ndim == 2:
+        data = data.mean(axis=1)
+
+    if state["sample_rate"] is None:
+        state["sample_rate"] = int(sample_rate)
+        state["buffer"] = data
+    else:
+        state["buffer"] = (
+            data
+            if state["buffer"] is None
+            else np.concatenate([state["buffer"], data], axis=0)
+        )
+
+    clip_seconds = 5.0
+    clip_len = int(clip_seconds * state["sample_rate"])
+    saved = 0
+
+    while state["buffer"] is not None and state["buffer"].shape[0] >= clip_len:
+        ok, message = can_accept_more()
+        if not ok:
+            return state, _format_collect_status(message)
+
+        clip = state["buffer"][:clip_len]
+        state["buffer"] = state["buffer"][clip_len:]
+        save_clip(clip, state["sample_rate"], transcript or None)
+        saved += 1
+
+    ok, message = can_accept_more()
+    if saved:
+        return state, _format_collect_status(f"Guardados: {saved}. {message}")
+    return state, _format_collect_status(message)
+
+
+def _on_collect_clear(state: dict | None):
+    clear_dataset()
+    return _init_collect_state(), _format_collect_status("Dataset limpio")
 
 
 def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
@@ -111,6 +183,27 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                                     value="",
                                 )
 
+                        with gr.Tab(label="Voice Collection"):
+                            gr.Markdown(
+                                "Recolecta clips del micro en segundo plano. "
+                                "Activa el toggle y empieza a grabar en el mic."
+                            )
+                            collect_toggle = gr.Checkbox(
+                                label="Recolectar muestras (MIC)", value=False
+                            )
+                            collect_transcript = gr.Textbox(
+                                label="Transcripcion (opcional)", lines=1, value=""
+                            )
+                            collect_status = gr.Markdown(_format_collect_status("OFF"))
+                            mic_stream = gr.Audio(
+                                label="Mic Stream",
+                                sources=["microphone"],
+                                type="numpy",
+                                streaming=True,
+                            )
+                            collect_clear = gr.Button("Limpiar dataset")
+                            collect_state = gr.State(_init_collect_state())
+
             with gr.Column(scale=3):
                 with gr.Row():
                     error = gr.HTML(
@@ -150,6 +243,22 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
             ],
             [audio, error],
             concurrency_limit=1,
+        )
+
+        collect_toggle.change(
+            _on_collect_toggle,
+            inputs=[collect_toggle, collect_state],
+            outputs=[collect_state, collect_status],
+        )
+        mic_stream.stream(
+            _on_mic_stream,
+            inputs=[mic_stream, collect_toggle, collect_transcript, collect_state],
+            outputs=[collect_state, collect_status],
+        )
+        collect_clear.click(
+            _on_collect_clear,
+            inputs=[collect_state],
+            outputs=[collect_state, collect_status],
         )
 
     return app

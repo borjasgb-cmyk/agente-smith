@@ -1,4 +1,5 @@
 import os
+import sys
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -19,17 +20,58 @@ from tools.webui.inference import get_inference_wrapper
 os.environ["EINX_FILTER_TRACEBACK"] = "false"
 
 
+EXPECTED_PYTHON = r"C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe"
+
+
+def _require_venv():
+    exe = Path(sys.executable).resolve()
+    expected = Path(EXPECTED_PYTHON).resolve()
+    if exe != expected:
+        print("ERROR: run_webui.py must be executed with the venv python.")
+        print(f"Expected: {expected}")
+        print(f"Current:  {exe}")
+        print(
+            f"Run: {expected} tools\\run_webui.py",
+        )
+        raise SystemExit(1)
+
+
+def _checkpoint_paths() -> tuple[Path, Path]:
+    env_dir = os.environ.get("FISH_CHECKPOINT_DIR")
+    if env_dir:
+        base = Path(env_dir)
+        llama = base / "openaudio-s1-mini"
+        decoder = base / "openaudio-s1-mini" / "codec.pth"
+        return llama, decoder
+    return (
+        Path("checkpoints/openaudio-s1-mini"),
+        Path("checkpoints/openaudio-s1-mini/codec.pth"),
+    )
+
+
+def _check_checkpoints(llama_path: Path, decoder_path: Path) -> None:
+    if llama_path.exists() and decoder_path.exists():
+        return
+    print("ERROR: checkpoints not found.")
+    print(f"Llama path:   {llama_path}")
+    print(f"Decoder path: {decoder_path}")
+    print("Set FISH_CHECKPOINT_DIR or create a symlink:")
+    print(r"  mklink /D checkpoints C:\Users\Usuario\fish-speech\checkpoints")
+    raise SystemExit(1)
+
+
 def parse_args():
     parser = ArgumentParser()
+    default_llama, default_decoder = _checkpoint_paths()
     parser.add_argument(
         "--llama-checkpoint-path",
         type=Path,
-        default="checkpoints/openaudio-s1-mini",
+        default=default_llama,
     )
     parser.add_argument(
         "--decoder-checkpoint-path",
         type=Path,
-        default="checkpoints/openaudio-s1-mini/codec.pth",
+        default=default_decoder,
     )
     parser.add_argument("--decoder-config-name", type=str, default="modded_dac_vq")
     parser.add_argument("--device", type=str, default="cuda")
@@ -42,7 +84,9 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    _require_venv()
     args = parse_args()
+    _check_checkpoints(args.llama_checkpoint_path, args.decoder_checkpoint_path)
     args.precision = torch.half if args.half else torch.bfloat16
 
     # Check if MPS or CUDA is available
