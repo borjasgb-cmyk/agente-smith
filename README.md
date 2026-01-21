@@ -80,3 +80,12 @@ Arranque del agente:
 ```powershell
 C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe AgenteSmith.py
 ```
+
+
+## AgenteSmith Panel GPU
+
+- Device selector: auto / cpu / cuda. Changing it requires restart.
+- Auto uses CUDA only if a real CUDA kernel test passes; otherwise it falls back to CPU and shows a warning.
+- Launcher: tools\launch_webui.ps1 (auto CUDA).
+- GPU smoke test:
+  powershell -ExecutionPolicy Bypass -File tools\smoke_test_gpu.ps1 -RequireCuda

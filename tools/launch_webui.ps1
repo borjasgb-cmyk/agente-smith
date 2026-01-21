@@ -40,7 +40,7 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-Write-Host "Iniciando AgenteSmith Panel (CPU)..." -ForegroundColor Green
-& $VenvPy "tools\run_webui.py" --device cpu
+Write-Host "Iniciando AgenteSmith Panel (Auto CUDA)..." -ForegroundColor Green
+& $VenvPy "tools\run_webui.py" --device auto
 
 Read-Host "WebUI finalizo. Presiona Enter para cerrar"

@@ -249,7 +249,18 @@ def _on_mode_change(mode: str):
     emit_event("mode_changed", {"mode": mode})
 
 
-def build_app(inference_fct: Callable, theme: str = "light", device_label: str = "CPU") -> gr.Blocks:
+def _on_device_change(device_value: str) -> str:
+    device_value = (device_value or "auto").lower()
+    save_config({"device_preference": device_value})
+    return f"Device preference saved: {device_value}. Restart required."
+
+
+def build_app(
+    inference_fct: Callable,
+    theme: str = "light",
+    device_label: str = "CPU",
+    device_meta: dict | None = None,
+) -> gr.Blocks:
     try:
         devices = list_devices()
     except Exception:
@@ -295,9 +306,34 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
         enabled=n8n_send,
     )
 
+    device_pref = (config.get("device_preference") or "auto").lower()
+    device_meta = device_meta or {}
+    gpu_info = device_meta.get("gpu_info")
+    device_reason = device_meta.get("reason")
+    vram_info = ""
+    if gpu_info and gpu_info.vram_total_gb:
+        total = f"{gpu_info.vram_total_gb:.1f} GB"
+        free = (
+            f"{gpu_info.vram_free_gb:.1f} GB"
+            if gpu_info.vram_free_gb is not None
+            else "-"
+        )
+        vram_info = f"VRAM: {free} free / {total} total"
+    cuda_status = "CUDA OK" if device_meta.get("cuda_ok") else "CUDA not usable"
+
     with gr.Blocks(theme=gr.themes.Base()) as app:
         gr.Markdown("# AgenteSmith Panel")
-        gr.Markdown("Device: " + device_label)
+        gr.Markdown(f"Device: {device_label} | {cuda_status}")
+        if vram_info:
+            gr.Markdown(vram_info)
+        if device_reason:
+            gr.Markdown(f"WARNING: {device_reason}")
+        device_choice = gr.Dropdown(
+            label="Device (requires restart)",
+            choices=["auto", "cpu", "cuda"],
+            value=device_pref,
+        )
+        device_status = gr.Markdown("Device preference loaded.")
         gr.Markdown(
             "Quick Start:\n"
             "1) Configura audio y prueba SYS en la pestana Listening.\n"
@@ -543,6 +579,11 @@ def build_app(inference_fct: Callable, theme: str = "light", device_label: str =
             outputs=[voice_status],
         )
         mode.change(_on_mode_change, inputs=[mode], outputs=[])
+        device_choice.change(
+            _on_device_change,
+            inputs=[device_choice],
+            outputs=[device_status],
+        )
         take_over_btn.click(
             lambda: _set_takeover(True, device_label),
             inputs=[],
