@@ -12,6 +12,8 @@ $RequiredFiles = @("config.json", "model.pth", "codec.pth", "tokenizer.tiktoken"
 Set-Location $RepoRoot
 $env:FISH_CHECKPOINT_DIR = $CheckpointBase
 $env:PYTHONIOENCODING = "utf-8"
+$env:CUDA_VISIBLE_DEVICES = "-1"
+$env:FISH_SKIP_WARMUP = "1"
 
 if (-not (Test-Path $VenvPy)) {
     Write-Host "ERROR: No se encontro el venv en:" -ForegroundColor Red

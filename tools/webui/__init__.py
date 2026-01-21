@@ -109,7 +109,7 @@ def _pick_defaults(devices: list[dict], config: dict) -> tuple[int | None, int |
             devices,
             "output",
             ["razer", "barracuda", "bt"],
-            hostapi_prefer="DirectSound",
+            hostapi_prefer="WASAPI",
         )
     if spk_idx is None:
         spk_idx = pick_device_index(
@@ -611,7 +611,8 @@ def build_app(
             with gr.Tab(label="Chat"):
                 gr.Markdown("Press to talk. Speech is recorded from the selected MIC device.")
                 chat_record_state = gr.State(False)
-                ptt_btn = gr.Button("Push-to-Talk (click to start/stop)", variant="primary")
+                listening_big = gr.Markdown("LISTENING: OFF")
+                ptt_btn = gr.Button("Hablar (Push-to-talk)", variant="primary")
                 chat_status = gr.Markdown("Idle")
                 chat_transcript = gr.Textbox(label="Transcripcion", lines=4)
                 chat_reply = gr.Textbox(label="Respuesta", lines=4)
@@ -879,6 +880,11 @@ def build_app(
                 chat_reply,
                 chat_tts_status,
             ],
+        )
+        chat_record_state.change(
+            lambda state: "LISTENING: ON" if state else "LISTENING: OFF",
+            inputs=[chat_record_state],
+            outputs=[listening_big],
         )
         take_over_btn.click(
             lambda: _set_takeover(True, device_label),

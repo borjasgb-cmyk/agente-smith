@@ -14,6 +14,13 @@ if (-not (Test-Path $VenvPy)) {
     exit 1
 }
 
+$refTest = @'
+from fish_speech.inference_engine.reference_loader import ReferenceLoader
+ReferenceLoader()
+print("ReferenceLoader OK")
+'@
+$refTest | & $VenvPy -
+
 $env:FISH_CHECKPOINT_DIR = "C:\Users\Usuario\fish-speech\checkpoints"
 $env:FISH_SKIP_WARMUP = "1"
 $env:FISH_SMOKE_UI = "1"

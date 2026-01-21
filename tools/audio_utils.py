@@ -98,17 +98,20 @@ def sys_quick_check(sys_idx: int) -> dict[str, float | str]:
     if sample_rate is None:
         return {"rms": 0.0, "peak": 0.0, "verdict": "SILENT"}
 
-    audio = sd.rec(
-        int(duration * sample_rate),
-        samplerate=sample_rate,
-        channels=1,
-        device=sys_idx,
-        blocking=True,
-    ).astype(np.float32).squeeze()
-    rms = float(math.sqrt(float(np.mean(audio**2)))) if audio.size else 0.0
-    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-    verdict = "OK" if (rms >= 0.002 or peak >= 0.01) else "SILENT"
-    return {"rms": rms, "peak": peak, "verdict": verdict}
+    try:
+        audio = sd.rec(
+            int(duration * sample_rate),
+            samplerate=sample_rate,
+            channels=1,
+            device=sys_idx,
+            blocking=True,
+        ).astype(np.float32).squeeze()
+        rms = float(math.sqrt(float(np.mean(audio**2)))) if audio.size else 0.0
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        verdict = "OK" if (rms >= 0.002 or peak >= 0.01) else "SILENT"
+        return {"rms": rms, "peak": peak, "verdict": verdict}
+    except Exception:
+        return {"rms": 0.0, "peak": 0.0, "verdict": "SILENT"}
 
 
 def mic_sys_bleed_check(mic_idx: int, sys_idx: int) -> dict[str, float | str]:

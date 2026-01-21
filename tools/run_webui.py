@@ -99,9 +99,19 @@ def parse_args():
 
 
 def _resolve_device(requested: str) -> tuple[str, dict]:
+    requested = (requested or "auto").lower()
+    if requested == "cpu":
+        return "cpu", {
+            "requested": requested,
+            "resolved": "cpu",
+            "reason": None,
+            "gpu_info": None,
+            "cuda_ok": False,
+            "cuda_error": None,
+        }
+
     info = get_gpu_info()
     cuda_ok, cuda_error = cuda_kernel_test()
-    requested = (requested or "auto").lower()
     resolved = "cpu"
     reason = None
 
@@ -145,10 +155,11 @@ if __name__ == "__main__":
     if device_meta["reason"]:
         print("WARNING:", device_meta["reason"])
     info = device_meta["gpu_info"]
-    print(
-        f"GPU: {info.device_name or '-'} | CC: {info.compute_capability or '-'} | "
-        f"torch {info.torch_version} | cuda {info.torch_cuda}"
-    )
+    if info:
+        print(
+            f"GPU: {info.device_name or '-'} | CC: {info.compute_capability or '-'} | "
+            f"torch {info.torch_version} | cuda {info.torch_cuda}"
+        )
 
     if os.environ.get("FISH_SMOKE_UI") == "1":
         logger.info("Smoke mode enabled, skipping model load.")

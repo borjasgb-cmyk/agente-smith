@@ -32,7 +32,11 @@ class ReferenceLoader:
 
         # Define the torchaudio backend
         list_backends = getattr(torchaudio, "list_audio_backends", None)
-        backends = list_backends() if callable(list_backends) else []
+        if callable(list_backends):
+            backends = list_backends()
+        else:
+            backends = []
+            logger.warning("torchaudio.list_audio_backends not available; using soundfile backend.")
         if "ffmpeg" in backends:
             self.backend = "ffmpeg"
         else:
