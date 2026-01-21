@@ -117,15 +117,22 @@ class AgentSupervisor:
             self._logger.info(clean)
             self._lines.append(clean)
             lower = clean.lower()
+            timestamp = time.time()
             if "[mic]" in lower or "transcripcion[mic]" in lower:
                 self._mic_lines.append(clean)
-                emit_event("transcript_mic", {"text": clean})
+                emit_event(
+                    "transcript_mic",
+                    {"text": clean, "timestamp": timestamp, "source": "mic"},
+                )
             if "[sys]" in lower or "transcripcion[sys]" in lower:
                 self._sys_lines.append(clean)
-                emit_event("transcript_sys", {"text": clean})
+                emit_event(
+                    "transcript_sys",
+                    {"text": clean, "timestamp": timestamp, "source": "sys"},
+                )
             if "warn" in lower:
                 self._warnings.append(clean)
-                emit_event("warning", {"text": clean})
+                emit_event("warning", {"text": clean, "timestamp": timestamp})
 
     def status(self) -> dict:
         return {
@@ -137,6 +144,10 @@ class AgentSupervisor:
             "warnings": list(self._warnings),
             "config": dict(self._last_config),
         }
+
+    def add_warning(self, message: str) -> None:
+        self._warnings.append(message)
+        self._logger.info(f"WARN {message}")
 
 
 SUPERVISOR = AgentSupervisor()

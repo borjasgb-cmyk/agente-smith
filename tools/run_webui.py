@@ -97,8 +97,11 @@ if __name__ == "__main__":
         def _dummy_infer(*_args, **_kwargs):
             return None, "Smoke mode"
 
-        print(f"* Running on local URL:  http://127.0.0.1:{args.server_port}")
-        app = build_app(_dummy_infer, args.theme)
+        print(
+            f"* Running on local URL:  http://127.0.0.1:{args.server_port}",
+            flush=True,
+        )
+        app = build_app(_dummy_infer, args.theme, args.device.upper())
         try:
             app.launch(server_port=args.server_port)
         except OSError as exc:
@@ -177,6 +180,7 @@ if __name__ == "__main__":
     app = build_app(
         inference_fct,
         args.theme,
+        args.device.upper(),
     )
     try:
         app.launch(server_port=args.server_port)

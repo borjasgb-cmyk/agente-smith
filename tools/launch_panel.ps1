@@ -14,7 +14,7 @@ if (-not (Test-Path $VenvPy)) {
     exit 1
 }
 
-Write-Host "Iniciando Agente Smith Control Panel (CPU)..." -ForegroundColor Green
+Write-Host "Iniciando AgenteSmith Panel (CPU)..." -ForegroundColor Green
 & $VenvPy "tools\run_webui.py" --device cpu
 
 Read-Host "WebUI finalizo. Presiona Enter para cerrar"

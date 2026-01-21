@@ -5,7 +5,12 @@ import numpy as np
 
 from fish_speech.i18n import i18n
 from tools.agent_supervisor import SUPERVISOR
-from tools.audio_utils import build_device_choices, list_devices, sys_quick_check
+from tools.audio_utils import (
+    build_device_choices,
+    list_devices,
+    mic_sys_bleed_check,
+    sys_quick_check,
+)
 from tools.n8n_client import emit_event, set_config, test_connection
 from tools.voice_collection import (
     can_accept_more,
@@ -60,11 +65,6 @@ def _on_collect_toggle(enabled: bool, state: dict | None, send_events: bool):
     return state, _format_collect_status(message), _collection_info()
 
 
-def _sync_collect_toggle(enabled: bool, state: dict | None, send_events: bool):
-    state, status, info = _on_collect_toggle(enabled, state, send_events)
-    return enabled, enabled, state, status, info
-
-
 def _on_mic_stream(audio, enabled: bool, transcript: str, state: dict | None, send_events: bool):
     if not enabled:
         return state or _init_collect_state(), _format_collect_status("OFF"), _collection_info()
@@ -114,29 +114,31 @@ def _on_mic_stream(audio, enabled: bool, transcript: str, state: dict | None, se
     return state, _format_collect_status(message), _collection_info()
 
 
-def _on_collect_clear(state: dict | None):
+def _on_collect_clear(state: dict | None, confirm: bool):
+    if not confirm:
+        return state or _init_collect_state(), _format_collect_status("Confirma la limpieza"), _collection_info()
     clear_dataset()
     return _init_collect_state(), _format_collect_status("Dataset limpio"), _collection_info()
 
 
-def _start_agent(mic_idx, sys_idx, mode, takeover, autopilot):
+def _start_agent(mic_idx, sys_idx, mode, takeover, autopilot, device_label: str):
     message = SUPERVISOR.start(mic_idx, sys_idx, mode)
     emit_event("mode_changed", {"mode": mode})
     emit_event("takeover_changed", {"enabled": takeover})
     emit_event("autopilot_changed", {"enabled": autopilot})
-    return _render_status(message, takeover, autopilot)
+    return _render_status(message, takeover, autopilot, device_label)
 
 
-def _stop_agent(takeover, autopilot):
+def _stop_agent(takeover, autopilot, device_label: str):
     message = SUPERVISOR.stop()
-    return _render_status(message, takeover, autopilot)
+    return _render_status(message, takeover, autopilot, device_label)
 
 
-def _refresh_status(takeover, autopilot):
-    return _render_status(None, takeover, autopilot)
+def _refresh_status(takeover, autopilot, device_label: str):
+    return _render_status(None, takeover, autopilot, device_label)
 
 
-def _render_status(message: str | None, takeover: bool, autopilot: bool):
+def _render_status(message: str | None, takeover: bool, autopilot: bool, device_label: str):
     status = SUPERVISOR.status()
     lines = status["lines"][-12:]
     mic_lines = status["mic_lines"][-5:]
@@ -144,8 +146,8 @@ def _render_status(message: str | None, takeover: bool, autopilot: bool):
     warnings = status["warnings"][-5:]
     cfg = status["config"]
 
-    running = "🟢 ON" if status["running"] else "⚪ OFF"
-    header = f"Agente: {running} | PID: {status['pid'] or '-'}"
+    running = "ON" if status["running"] else "OFF"
+    header = f"Agente: {running} | PID: {status['pid'] or '-'} | Device: {device_label}"
     mode = cfg.get("mode", "-")
     mic_idx = cfg.get("mic_idx", "-")
     sys_idx = cfg.get("sys_idx", "-")
@@ -167,41 +169,71 @@ def _run_sys_check(sys_idx: int):
     if sys_idx is None:
         return "SYS_CHECK: sin dispositivo"
     result = sys_quick_check(sys_idx)
-    return (
-        f"SYS_CHECK rms={result['rms']:.6f} peak={result['peak']:.6f} verdict={result['verdict']}"
+    base = f"SYS_CHECK rms={result['rms']:.6f} peak={result['peak']:.6f} verdict={result['verdict']}"
+    if result["verdict"] == "SILENT":
+        emit_event("warning", {"type": "sys_silent", "sys_idx": sys_idx})
+        SUPERVISOR.add_warning(f"SYS silent on device {sys_idx}")
+        guidance = (
+            "SILENT: routea Chrome/Aircall a VB-Audio Virtual Cable "
+            "(Altavoces (3- VB-Audio Virtual Cable) o CABLE In 16 Ch) "
+            "en el Volume Mixer."
+        )
+        return f"{base}\n{guidance}"
+    return base
+
+
+def _run_bleed_check(mic_idx: int, sys_idx: int):
+    if mic_idx is None or sys_idx is None:
+        return "BLEED_CHECK: faltan dispositivos"
+    result = mic_sys_bleed_check(mic_idx, sys_idx)
+    base = (
+        "BLEED_CHECK "
+        f"mic_rms={result['mic_rms']:.6f} sys_rms={result['sys_rms']:.6f} "
+        f"ratio={result['ratio']:.3f} corr={result['corr']:.3f} verdict={result['verdict']}"
     )
+    if result["verdict"] == "BLEEDING":
+        emit_event(
+            "warning",
+            {"type": "mic_sys_bleed", "mic_idx": mic_idx, "sys_idx": sys_idx},
+        )
+        SUPERVISOR.add_warning(f"BLEED detected (MIC {mic_idx} -> SYS {sys_idx})")
+        guidance = (
+            "BLEEDING: desactiva 'Listen to this device' en CABLE Output "
+            "o evita rutear el micro al cable."
+        )
+        return f"{base}\n{guidance}"
+    return base
 
 
-def _apply_n8n_settings(base_url, webhook_url, api_key, open_url, send_events: bool):
+def _apply_n8n_settings(webhook_url, open_url, send_events: bool):
     set_config(
-        base_url=base_url,
         webhook_url=webhook_url,
-        api_key=api_key,
         open_url=open_url,
         enabled=send_events,
     )
     save_config(
         {
-            "n8n_base_url": base_url,
             "n8n_webhook_url": webhook_url,
-            "n8n_api_key": api_key,
             "n8n_open_url": open_url,
             "n8n_send_events": send_events,
         }
     )
     if send_events:
         emit_event("collection_status", {"enabled": send_events})
-    return _format_n8n_status("Configuracion actualizada")
+    return _format_n8n_status(webhook_url)
 
 
-def _test_n8n_connection(base_url, webhook_url, api_key):
-    set_config(base_url=base_url, webhook_url=webhook_url, api_key=api_key)
+def _test_n8n_connection(webhook_url):
+    set_config(webhook_url=webhook_url)
     ok, msg = test_connection()
-    return _format_n8n_status(msg if ok else f"ERROR: {msg}")
+    status = "OK" if ok else f"ERROR: {msg}"
+    return f"n8n test: {status}"
 
 
-def _format_n8n_status(message: str) -> str:
-    return f"N8N: {message}"
+def _format_n8n_status(webhook_url: str) -> str:
+    if not webhook_url:
+        return "n8n: not configured"
+    return f"n8n: webhook ready ({webhook_url})"
 
 
 def _format_open_link(url: str) -> str:
@@ -228,7 +260,7 @@ def _on_toggle_change(name: str, enabled: bool):
     emit_event(name, {"enabled": enabled})
 
 
-def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
+def build_app(inference_fct: Callable, theme: str = "light", device_label: str = "CPU") -> gr.Blocks:
     try:
         devices = list_devices()
     except Exception:
@@ -246,34 +278,36 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
     config = load_config()
     default_voice = config.get("voice_id") if config.get("voice_id") in voice_map else None
 
-    n8n_base = config.get("n8n_base_url", "")
-    n8n_webhook = config.get("n8n_webhook_url", "")
-    n8n_api_key = config.get("n8n_api_key", "")
+    n8n_webhook = config.get("n8n_webhook_url") or "http://localhost:5678/webhook/Transcripcion"
     n8n_open = config.get("n8n_open_url", "")
     n8n_send = bool(config.get("n8n_send_events", False))
     set_config(
-        base_url=n8n_base,
         webhook_url=n8n_webhook,
-        api_key=n8n_api_key,
         open_url=n8n_open,
         enabled=n8n_send,
     )
 
     with gr.Blocks(theme=gr.themes.Base()) as app:
         gr.Markdown("# Agente Smith Control Panel")
+        gr.Markdown("Device: " + device_label)
         gr.Markdown(
             "Quick Start:\n"
-            "1) Inicia el agente (tab Agent)\n"
-            "2) Revisa dispositivos y SYS check (tab Listening)\n"
-            "3) Abre la URL local para usar el panel"
+            "1) Configura audio y prueba SYS en la pestana Listening.\n"
+            "2) Inicia el agente en la pestana Agent.\n"
+            "3) (Opcional) Configura n8n para recibir eventos."
         )
-        gr.Markdown("Comando rapido (CPU):")
         quick_cmd = gr.Textbox(
             value=r"C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.py --device cpu",
             label="Run",
             interactive=False,
         )
         copy_btn = gr.Button("Copy command")
+        with gr.Accordion("First run checklist", open=False):
+            gr.Markdown(
+                "- En Windows Volume Mixer, routea Chrome/Aircall a VB-Audio Virtual Cable.\n"
+                "- En Control Panel > Sound > Recording, revisa CABLE Output y 'Listen to this device'.\n"
+                "- Si usas n8n, configura el webhook en la pestana n8n."
+            )
         gr.Markdown(HEADER_MD)
 
         app.load(
@@ -297,9 +331,7 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                 )
                 takeover = gr.Checkbox(label="Takeover (mute agent / stop actions)", value=False)
                 autopilot = gr.Checkbox(label="Autopilot (agent actions enabled)", value=False)
-                collect_toggle_agent = gr.Checkbox(label="Send voice samples", value=False)
-
-                status_panel = gr.Markdown("Agente: ⚪ OFF")
+                status_panel = gr.Markdown("Agente: OFF")
                 warnings_panel = gr.Markdown("(sin warnings)")
 
                 with gr.Row():
@@ -324,6 +356,8 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                     gr.Markdown("No se pudieron listar dispositivos de audio.")
                 sys_check_btn = gr.Button("Run quick SYS check (3s)")
                 sys_check_out = gr.Markdown("SYS_CHECK: pendiente")
+                bleed_check_btn = gr.Button("Run MIC/SYS bleed check (3s + 3s)")
+                bleed_check_out = gr.Markdown("BLEED_CHECK: pendiente")
 
             with gr.Tab(label="Voices"):
                 voice_select = gr.Dropdown(
@@ -335,12 +369,21 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                 with gr.Accordion("Voces no disponibles", open=False):
                     gr.Markdown(_format_invalid_voices(invalid_voices))
 
+            with gr.Tab(label="n8n"):
+                gr.Markdown("Webhook-only. Configura `N8N_WEBHOOK_URL` para recibir eventos.")
+                n8n_send_toggle = gr.Checkbox(label="Send events to n8n", value=n8n_send)
+                n8n_webhook_input = gr.Textbox(label="N8N_WEBHOOK_URL", value=n8n_webhook)
+                n8n_open_input = gr.Textbox(label="Open n8n workflow (optional)", value=n8n_open)
+                n8n_open_link = gr.Markdown(_format_open_link(n8n_open))
+                n8n_status = gr.Markdown(_format_n8n_status(n8n_webhook))
+                n8n_test = gr.Button("Test connection")
+
             with gr.Tab(label="Voice Collection"):
                 gr.Markdown(
                     "Recolecta clips del micro en segundo plano. "
                     "Activa el toggle y empieza a grabar en el mic."
                 )
-                collect_toggle_main = gr.Checkbox(
+                collect_toggle = gr.Checkbox(
                     label="Recolectar muestras (MIC)", value=False
                 )
                 collect_transcript = gr.Textbox(
@@ -354,22 +397,9 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                     type="numpy",
                     streaming=True,
                 )
+                confirm_clear = gr.Checkbox(label="Confirmar limpieza", value=False)
                 collect_clear = gr.Button("Limpiar dataset")
                 collect_state = gr.State(_init_collect_state())
-
-            with gr.Tab(label="n8n"):
-                gr.Markdown(
-                    "Nota: para emitir eventos en tiempo real se requiere `N8N_WEBHOOK_URL`. "
-                    "Si solo usas BASE_URL + API_KEY, el test funciona pero el envio de eventos requiere webhook."
-                )
-                n8n_send_toggle = gr.Checkbox(label="Send events to n8n", value=n8n_send)
-                n8n_base_input = gr.Textbox(label="N8N_BASE_URL", value=n8n_base)
-                n8n_webhook_input = gr.Textbox(label="N8N_WEBHOOK_URL", value=n8n_webhook)
-                n8n_api_key_input = gr.Textbox(label="N8N_API_KEY", value=n8n_api_key, type="password")
-                n8n_open_input = gr.Textbox(label="Open n8n workflow (optional)", value=n8n_open)
-                n8n_open_link = gr.Markdown(_format_open_link(n8n_open))
-                n8n_status = gr.Markdown(_format_n8n_status("Sin configurar"))
-                n8n_test = gr.Button("Test connection")
 
         with gr.Accordion("TTS Quick Test", open=False):
             with gr.Row():
@@ -430,7 +460,7 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                 )
 
             with gr.Row():
-                generate = gr.Button(value="\U0001f3a7 " + i18n("Generate"), variant="primary")
+                generate = gr.Button(value=i18n("Generate"), variant="primary")
                 error = gr.HTML(label=i18n("Error Message"))
                 audio = gr.Audio(label=i18n("Generated Audio"), type="numpy")
 
@@ -455,17 +485,17 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
         )
 
         start_btn.click(
-            _start_agent,
+            lambda mic, sys, m, t, a: _start_agent(mic, sys, m, t, a, device_label),
             inputs=[mic_dev, sys_dev, mode, takeover, autopilot],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )
         stop_btn.click(
-            _stop_agent,
+            lambda t, a: _stop_agent(t, a, device_label),
             inputs=[takeover, autopilot],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )
         refresh_btn.click(
-            _refresh_status,
+            lambda t, a: _refresh_status(t, a, device_label),
             inputs=[takeover, autopilot],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )
@@ -474,6 +504,11 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
             _run_sys_check,
             inputs=[sys_dev],
             outputs=[sys_check_out],
+        )
+        bleed_check_btn.click(
+            _run_bleed_check,
+            inputs=[mic_dev, sys_dev],
+            outputs=[bleed_check_out],
         )
 
         voice_select.change(
@@ -485,36 +520,19 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
         takeover.change(lambda v: _on_toggle_change("takeover_changed", v), inputs=[takeover], outputs=[])
         autopilot.change(lambda v: _on_toggle_change("autopilot_changed", v), inputs=[autopilot], outputs=[])
 
-        collect_toggle_agent.change(
-            _sync_collect_toggle,
-            inputs=[collect_toggle_agent, collect_state, n8n_send_toggle],
-            outputs=[
-                collect_toggle_agent,
-                collect_toggle_main,
-                collect_state,
-                collect_status,
-                collect_info,
-            ],
-        )
-        collect_toggle_main.change(
-            _sync_collect_toggle,
-            inputs=[collect_toggle_main, collect_state, n8n_send_toggle],
-            outputs=[
-                collect_toggle_agent,
-                collect_toggle_main,
-                collect_state,
-                collect_status,
-                collect_info,
-            ],
+        collect_toggle.change(
+            _on_collect_toggle,
+            inputs=[collect_toggle, collect_state, n8n_send_toggle],
+            outputs=[collect_state, collect_status, collect_info],
         )
         mic_stream.stream(
             _on_mic_stream,
-            inputs=[mic_stream, collect_toggle_main, collect_transcript, collect_state, n8n_send_toggle],
+            inputs=[mic_stream, collect_toggle, collect_transcript, collect_state, n8n_send_toggle],
             outputs=[collect_state, collect_status, collect_info],
         )
         collect_clear.click(
             _on_collect_clear,
-            inputs=[collect_state],
+            inputs=[collect_state, confirm_clear],
             outputs=[collect_state, collect_status, collect_info],
         )
 
@@ -523,14 +541,19 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
             inputs=[n8n_open_input],
             outputs=[n8n_open_link],
         )
+        n8n_webhook_input.change(
+            _apply_n8n_settings,
+            inputs=[n8n_webhook_input, n8n_open_input, n8n_send_toggle],
+            outputs=[n8n_status],
+        )
         n8n_test.click(
             _test_n8n_connection,
-            inputs=[n8n_base_input, n8n_webhook_input, n8n_api_key_input],
+            inputs=[n8n_webhook_input],
             outputs=[n8n_status],
         )
         n8n_send_toggle.change(
             _apply_n8n_settings,
-            inputs=[n8n_base_input, n8n_webhook_input, n8n_api_key_input, n8n_open_input, n8n_send_toggle],
+            inputs=[n8n_webhook_input, n8n_open_input, n8n_send_toggle],
             outputs=[n8n_status],
         )
 
@@ -543,7 +566,7 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
 
         status_timer = gr.Timer(2.0)
         status_timer.tick(
-            _refresh_status,
+            lambda t, a: _refresh_status(t, a, device_label),
             inputs=[takeover, autopilot],
             outputs=[status_panel, log_tail, mic_lines, sys_lines, warnings_panel],
         )

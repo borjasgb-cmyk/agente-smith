@@ -50,11 +50,16 @@ C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.p
 
 ### Agente Smith Control Panel
 
-### n8n
+Tabs: Agent / Listening / Voices / n8n / Voice Collection.
 
-En la pesta?a n8n puedes configurar `N8N_BASE_URL`, `N8N_WEBHOOK_URL` y `N8N_API_KEY` (opcional).
-Si defines `N8N_WEBHOOK_URL`, los eventos se envian por POST.
-Si solo usas BASE_URL + API_KEY, se asume `/rest/settings` para test y se requiere webhook para eventos.
+Quick checks (Listening tab): SYS check (3s) y MIC/SYS bleed check (3s + 3s).
+
+### n8n (webhook-only)
+
+Configura solo `N8N_WEBHOOK_URL` (default: `http://localhost:5678/webhook/Transcripcion`).
+El toggle **Send events to n8n** controla el envio. Si el webhook esta vacio, el estado muestra "n8n: not configured".
+
+Acceso directo recomendado: `tools\launch_panel.ps1` (CPU).
 
 ### Smoke test UI
 
