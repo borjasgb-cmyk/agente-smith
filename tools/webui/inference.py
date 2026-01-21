@@ -8,6 +8,7 @@ from fish_speech.utils.schema import ServeReferenceAudio, ServeTTSRequest
 
 def inference_wrapper(
     text,
+    voice_id,
     reference_id,
     reference_audio,
     reference_text,
@@ -19,16 +20,24 @@ def inference_wrapper(
     seed,
     use_memory_cache,
     engine,
+    voice_map,
 ):
     """
     Wrapper for the inference function.
     Used in the Gradio interface.
     """
 
-    if reference_audio:
+    references = []
+    if voice_id and voice_id in voice_map:
+        voice = voice_map[voice_id]
+        try:
+            references = get_reference_audio(voice["ref_audio"], "")
+        except Exception as exc:
+            return None, build_html_error_message(exc)
+        reference_id = None
+        reference_audio = None
+    elif reference_audio:
         references = get_reference_audio(reference_audio, reference_text)
-    else:
-        references = []
 
     req = ServeTTSRequest(
         text=text,
@@ -86,4 +95,13 @@ def get_inference_wrapper(engine) -> Callable:
     return partial(
         inference_wrapper,
         engine=engine,
+        voice_map={},
+    )
+
+
+def get_inference_wrapper_with_voices(engine, voice_map: dict) -> Callable:
+    return partial(
+        inference_wrapper,
+        engine=engine,
+        voice_map=voice_map,
     )

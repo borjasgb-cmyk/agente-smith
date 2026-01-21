@@ -48,6 +48,17 @@ $env:FISH_CHECKPOINT_DIR = "C:\Users\Usuario\fish-speech\checkpoints"
 C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.py
 ```
 
+### Agente Smith Control Panel
+
+Lanzador recomendado (CPU por defecto):
+```powershell
+C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe tools\run_webui.py --device cpu
+```
+
+Acceso directo (PowerShell): `tools\launch_panel.ps1`
+
+En la UI, usa las pesta?as Agent/Listening/Voices/Voice Collection para control completo.
+
 Arranque del agente:
 ```powershell
 C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe AgenteSmith.py

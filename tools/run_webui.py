@@ -13,8 +13,9 @@ from fish_speech.inference_engine import TTSInferenceEngine
 from fish_speech.models.dac.inference import load_model as load_decoder_model
 from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
 from fish_speech.utils.schema import ServeTTSRequest
+from tools.voices import load_config, load_voices
 from tools.webui import build_app
-from tools.webui.inference import get_inference_wrapper
+from tools.webui.inference import get_inference_wrapper_with_voices
 
 # Make einx happy
 os.environ["EINX_FILTER_TRACEBACK"] = "false"
@@ -74,7 +75,7 @@ def parse_args():
         default=default_decoder,
     )
     parser.add_argument("--decoder-config-name", type=str, default="modded_dac_vq")
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--half", action="store_true")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--max-gradio-length", type=int, default=0)
@@ -89,16 +90,19 @@ if __name__ == "__main__":
     _check_checkpoints(args.llama_checkpoint_path, args.decoder_checkpoint_path)
     args.precision = torch.half if args.half else torch.bfloat16
 
-    # Check if MPS or CUDA is available
-    if torch.backends.mps.is_available():
-        args.device = "mps"
-        logger.info("mps is available, running on mps.")
-    elif torch.xpu.is_available():
-        args.device = "xpu"
-        logger.info("XPU is available, running on XPU.")
-    elif not torch.cuda.is_available():
-        logger.info("CUDA is not available, running on CPU.")
-        args.device = "cpu"
+    if args.device == "auto":
+        if torch.backends.mps.is_available():
+            args.device = "mps"
+            logger.info("mps is available, running on mps.")
+        elif torch.xpu.is_available():
+            args.device = "xpu"
+            logger.info("XPU is available, running on XPU.")
+        elif torch.cuda.is_available():
+            args.device = "cuda"
+            logger.info("CUDA is available, running on CUDA.")
+        else:
+            logger.info("CUDA is not available, running on CPU.")
+            args.device = "cpu"
 
     logger.info("Loading Llama model...")
     llama_queue = launch_thread_safe_queue(
@@ -145,7 +149,13 @@ if __name__ == "__main__":
     logger.info("Warming up done, launching the web UI...")
 
     # Get the inference function with the immutable arguments
-    inference_fct = get_inference_wrapper(inference_engine)
+    valid_voices, invalid_voices = load_voices()
+    voice_map = {voice["id"]: voice for voice in valid_voices}
+    config = load_config()
+    inference_fct = get_inference_wrapper_with_voices(inference_engine, voice_map)
 
-    app = build_app(inference_fct, args.theme)
+    app = build_app(
+        inference_fct,
+        args.theme,
+    )
     app.launch()
