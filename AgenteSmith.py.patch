@@ -1,0 +1,24 @@
+*** Begin Patch
+*** Update File: AgenteSmith.py
+@@
+-import subprocess
++import subprocess
++import unicodedata
+@@
+-    whisper_cmd = ["python", whisper_live_path]
+-    process = subprocess.Popen(whisper_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    venv_python = r"C:\Users\Usuario\fish-speech\fishspeech_env\Scripts\python.exe"
++    whisper_cmd = [venv_python, whisper_live_path]
++    env = os.environ.copy()
++    env["PYTHONIOENCODING"] = "utf-8"
++    process = subprocess.Popen(
++        whisper_cmd,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        text=True,
++        env=env,
++    )
+@@
+-        line = line.strip()
++        line = unicodedata.normalize("NFC", line).strip()
+*** End Patch
