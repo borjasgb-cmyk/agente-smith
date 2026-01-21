@@ -1,15 +1,28 @@
+import json
+import os
+import threading
+import time
+from pathlib import Path
 from typing import Callable
 
 import gradio as gr
+import soundfile as sf
 from fish_speech.i18n import i18n
 from tools.agent_supervisor import SUPERVISOR
+from tools.asr_utils import transcribe_audio
 from tools.audio_utils import (
     build_device_choices,
     list_devices,
     mic_sys_bleed_check,
+    pick_device_index,
+    play_audio,
+    rms_meter,
     sys_quick_check,
 )
+from tools.chat_audio import is_recording, start_recording, stop_recording
+from tools.llm_client import generate_reply
 from tools.n8n_client import emit_event, set_config, test_connection
+from tools.tts_sapi import sapi_speak_to_wav
 from tools.voice_collection import (
     clear_dataset,
     data_paths,
@@ -70,6 +83,59 @@ def _refresh_collection_stats(last_count: int, last_seconds: int, send_events: b
     if send_events and (count != last_count or seconds_int != last_seconds):
         emit_event("collection_stats", {"clips": count, "seconds": seconds_int})
     return _collection_info(), count, seconds_int
+
+
+def _pick_defaults(devices: list[dict], config: dict) -> tuple[int | None, int | None, int | None]:
+    mic_idx = config.get("mic_dev_index")
+    sys_idx = config.get("sys_dev_index")
+    spk_idx = config.get("spk_dev_index")
+
+    if mic_idx is None:
+        mic_idx = pick_device_index(
+            devices,
+            "input",
+            ["razer", "barracuda", "2.4"],
+            hostapi_prefer="WASAPI",
+        )
+    if sys_idx is None:
+        sys_idx = pick_device_index(
+            devices,
+            "input",
+            ["cable output"],
+            hostapi_prefer="WASAPI",
+        )
+    if spk_idx is None:
+        spk_idx = pick_device_index(
+            devices,
+            "output",
+            ["razer", "barracuda", "bt"],
+            hostapi_prefer="DirectSound",
+        )
+    if spk_idx is None:
+        spk_idx = pick_device_index(
+            devices,
+            "output",
+            ["razer", "barracuda"],
+            hostapi_prefer="WASAPI",
+        )
+    return mic_idx, sys_idx, spk_idx
+
+
+def _save_audio_indices(mic_idx: int | None, sys_idx: int | None, spk_idx: int | None) -> None:
+    update = {}
+    if mic_idx is not None:
+        update["mic_dev_index"] = int(mic_idx)
+    if sys_idx is not None:
+        update["sys_dev_index"] = int(sys_idx)
+    if spk_idx is not None:
+        update["spk_dev_index"] = int(spk_idx)
+    if update:
+        save_config(update)
+
+
+def _on_audio_indices_change(mic_idx: int | None, sys_idx: int | None, spk_idx: int | None) -> str:
+    _save_audio_indices(mic_idx, sys_idx, spk_idx)
+    return "Audio indices saved."
 
 
 def _on_collect_toggle(enabled: bool, mic_idx: int | None, send_events: bool):
@@ -166,6 +232,22 @@ def _run_sys_check(sys_idx: int):
     return base
 
 
+def _sys_status_banner(sys_idx: int | None) -> str:
+    if sys_idx is None:
+        return "SYS_STATUS: sin dispositivo"
+    result = sys_quick_check(int(sys_idx))
+    base = f"SYS_STATUS {result['verdict']} (rms={result['rms']:.6f}, peak={result['peak']:.6f})"
+    if result["verdict"] == "SILENT":
+        return (
+            base
+            + "\nHow to fix: Windows Volume Mixer -> set Chrome/Aircall output to "
+            "'Altavoces (3- VB-Audio Virtual Cable)' o 'CABLE In 16 Ch'. "
+            "Then Control Panel > Sound > Recording > CABLE Output > Listen "
+            "> 'Listen to this device' > Playback through Razer (BT)."
+        )
+    return base
+
+
 def _run_bleed_check(mic_idx: int, sys_idx: int):
     if mic_idx is None or sys_idx is None:
         return "BLEED_CHECK: faltan dispositivos"
@@ -255,6 +337,131 @@ def _on_device_change(device_value: str) -> str:
     return f"Device preference saved: {device_value}. Restart required."
 
 
+def _on_llm_change(endpoint: str, api_key: str, asr_model: str) -> str:
+    save_config(
+        {
+            "llm_endpoint": endpoint,
+            "llm_api_key": api_key,
+            "asr_model": asr_model,
+        }
+    )
+    return "Chat config saved."
+
+
+def _poll_audio_levels(mic_idx: int | None, sys_idx: int | None):
+    mic_status = "MIC: -"
+    sys_status = "SYS: -"
+    listening = "Idle"
+    mic_rms = 0.0
+    sys_rms = 0.0
+    if mic_idx is not None:
+        mic = rms_meter(int(mic_idx))
+        mic_rms = float(mic["rms"])
+        mic_status = f"MIC rms={mic['rms']:.4f} peak={mic['peak']:.4f} ({mic['status']})"
+    if sys_idx is not None:
+        sysv = rms_meter(int(sys_idx))
+        sys_rms = float(sysv["rms"])
+        sys_status = f"SYS rms={sysv['rms']:.4f} peak={sysv['peak']:.4f} ({sysv['status']})"
+    if mic_rms >= 0.01 or sys_rms >= 0.01:
+        listening = "Listening..."
+    return mic_status, sys_status, listening
+
+
+def _write_meter_log(mic_text: str, sys_text: str, listen_text: str) -> None:
+    if os.environ.get("PANEL_METER_LOG") != "1":
+        return
+    log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "panel_meters.json").write_text(
+        json.dumps(
+            {"mic": mic_text, "sys": sys_text, "status": listen_text, "ts": time.time()},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _poll_audio_levels_with_log(mic_idx: int | None, sys_idx: int | None):
+    mic_text, sys_text, listen_text = _poll_audio_levels(mic_idx, sys_idx)
+    _write_meter_log(mic_text, sys_text, listen_text)
+    return mic_text, sys_text, listen_text
+
+
+def _poll_audio_status(mic_idx: int | None, sys_idx: int | None):
+    mic_text, sys_text, listen_text = _poll_audio_levels_with_log(mic_idx, sys_idx)
+    banner = _sys_status_banner(sys_idx)
+    return mic_text, sys_text, listen_text, banner
+
+
+def _start_meter_thread(mic_idx: int | None, sys_idx: int | None) -> None:
+    if os.environ.get("PANEL_METER_LOG") != "1":
+        return
+
+    def worker():
+        for _ in range(5):
+            _poll_audio_levels_with_log(mic_idx, sys_idx)
+            time.sleep(1.0)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _chat_handle(
+    mic_idx: int | None,
+    voice_id: str | None,
+    spk_idx: int | None,
+    llm_endpoint: str,
+    llm_api_key: str,
+    asr_model: str,
+    valid_voice_ids: set[str],
+    record_state: bool,
+    inference_fct: Callable,
+):
+    if not record_state:
+        ok, msg = start_recording(mic_idx)
+        return True, f"Listening... {msg}", "", "", ""
+
+    ok, msg, audio, sample_rate = stop_recording()
+    if not ok or audio is None or sample_rate is None:
+        return False, f"Recording stopped: {msg}", "", "", f"ASR error: {msg}"
+    transcript = transcribe_audio(audio, sample_rate, asr_model)
+    if not transcript:
+        return False, "ASR empty", "", "", "ASR empty"
+    reply = generate_reply(transcript, llm_endpoint, llm_api_key)
+    Path("data").mkdir(parents=True, exist_ok=True)
+    if voice_id and voice_id in valid_voice_ids:
+        tts_audio, err = inference_fct(
+            reply,
+            voice_id,
+            "",
+            None,
+            "",
+            0,
+            300,
+            0.8,
+            1.1,
+            0.8,
+            0,
+            "on",
+        )
+        if err:
+            reply_audio_path = Path("data") / "chat_last.wav"
+            ok_sapi, msg_sapi = sapi_speak_to_wav(reply, str(reply_audio_path))
+            status = f"TTS fallback: {msg_sapi}" if not ok_sapi else "TTS fallback OK"
+            return False, "Done", transcript, reply, status
+        if isinstance(tts_audio, tuple) and len(tts_audio) == 2:
+            sr, wav = tts_audio
+        else:
+            sr, wav = 24000, tts_audio
+        sf.write("data/chat_last.wav", wav, sr)
+        play_audio(wav, sr, spk_idx)
+        return False, "Done", transcript, reply, "TTS FishSpeech OK"
+    reply_audio_path = Path("data") / "chat_last.wav"
+    ok_sapi, msg_sapi = sapi_speak_to_wav(reply, str(reply_audio_path))
+    if ok_sapi:
+        return False, "Done", transcript, reply, "TTS SAPI OK"
+    return False, "Done", transcript, reply, f"TTS SAPI error: {msg_sapi}"
+
+
 def build_app(
     inference_fct: Callable,
     theme: str = "light",
@@ -267,9 +474,10 @@ def build_app(
         devices = []
     mic_choices = build_device_choices(devices, "input")
     sys_choices = build_device_choices(devices, "input")
+    spk_choices = build_device_choices(devices, "output")
     mic_label_map = {idx: label for label, idx in mic_choices}
-    default_mic = mic_choices[0][1] if mic_choices else None
-    default_sys = sys_choices[0][1] if sys_choices else None
+    sys_label_map = {idx: label for label, idx in sys_choices}
+    spk_label_map = {idx: label for label, idx in spk_choices}
 
     valid_voices, invalid_voices = load_voices()
     voice_map = {voice["id"]: voice for voice in valid_voices}
@@ -285,6 +493,15 @@ def build_app(
             continue
         voice_choices.append((f"{name} ({vid}) [Not configured]", vid))
     config = load_config()
+    default_mic, default_sys, default_spk = _pick_defaults(devices, config)
+    if default_mic is None and mic_choices:
+        default_mic = mic_choices[0][1]
+    if default_sys is None and sys_choices:
+        default_sys = sys_choices[0][1]
+    if default_spk is None and spk_choices:
+        default_spk = spk_choices[0][1]
+    _save_audio_indices(default_mic, default_sys, default_spk)
+    _start_meter_thread(default_mic, default_sys)
     default_voice = config.get("voice_id") if config.get("voice_id") in (valid_ids | invalid_ids) else None
     if default_voice in valid_ids:
         voice_status_text = "Voice ready."
@@ -298,6 +515,9 @@ def build_app(
     n8n_api_key = config.get("n8n_api_key", "")
     n8n_open = config.get("n8n_open_url", "")
     n8n_send = bool(config.get("n8n_send_events", False))
+    llm_endpoint = config.get("llm_endpoint", "")
+    llm_api_key = config.get("llm_api_key", "")
+    asr_model = config.get("asr_model", "base")
     set_config(
         base_url=n8n_base,
         webhook_url=n8n_webhook,
@@ -388,7 +608,22 @@ def build_app(
                 with gr.Accordion("Log tail", open=False):
                     log_tail = gr.Textbox(label="Log tail", lines=10)
 
+            with gr.Tab(label="Chat"):
+                gr.Markdown("Press to talk. Speech is recorded from the selected MIC device.")
+                chat_record_state = gr.State(False)
+                ptt_btn = gr.Button("Push-to-Talk", variant="primary")
+                chat_status = gr.Markdown("Idle")
+                chat_transcript = gr.Textbox(label="Transcripcion", lines=4)
+                chat_reply = gr.Textbox(label="Respuesta", lines=4)
+                chat_tts_status = gr.Markdown("TTS: -")
+                with gr.Accordion("Chat settings", open=False):
+                    llm_endpoint_input = gr.Textbox(label="LLM_ENDPOINT", value=llm_endpoint)
+                    llm_api_key_input = gr.Textbox(label="LLM_API_KEY", value=llm_api_key, type="password")
+                    asr_model_input = gr.Textbox(label="ASR_MODEL", value=asr_model)
+                    llm_status = gr.Markdown("Chat config loaded.")
+
             with gr.Tab(label="Listening"):
+                sys_banner = gr.Markdown("SYS_STATUS: pendiente")
                 mic_dev = gr.Dropdown(
                     label="MIC_DEV_INDEX",
                     choices=mic_choices,
@@ -399,16 +634,26 @@ def build_app(
                     choices=sys_choices,
                     value=default_sys,
                 )
+                spk_dev = gr.Dropdown(
+                    label="SPK_DEV_INDEX",
+                    choices=spk_choices,
+                    value=default_spk,
+                )
                 gr.Markdown(
                     "SYS routing: Windows Volume Mixer -> Chrome/Aircall output to "
                     "'Altavoces (3- VB-Audio Virtual Cable)' o 'CABLE In 16 Ch'."
                 )
                 if not mic_choices or not sys_choices:
                     gr.Markdown("No se pudieron listar dispositivos de audio.")
+                audio_save_status = gr.Markdown("Audio indices loaded.")
                 sys_check_btn = gr.Button("Run quick SYS check (3s)")
                 sys_check_out = gr.Markdown("SYS_CHECK: pendiente")
                 bleed_check_btn = gr.Button("Run MIC bleed check (speak 3s)")
                 bleed_check_out = gr.Markdown("BLEED_CHECK: pendiente")
+                with gr.Row():
+                    mic_meter = gr.Markdown("MIC: -")
+                    sys_meter = gr.Markdown("SYS: -")
+                    listen_indicator = gr.Markdown("Idle")
 
             with gr.Tab(label="Voices"):
                 gr.Markdown(_format_available_voices(valid_voices))
@@ -572,6 +817,21 @@ def build_app(
             inputs=[mic_dev],
             outputs=[collect_mic_label],
         )
+        mic_dev.change(
+            _on_audio_indices_change,
+            inputs=[mic_dev, sys_dev, spk_dev],
+            outputs=[audio_save_status],
+        )
+        sys_dev.change(
+            _on_audio_indices_change,
+            inputs=[mic_dev, sys_dev, spk_dev],
+            outputs=[audio_save_status],
+        )
+        spk_dev.change(
+            _on_audio_indices_change,
+            inputs=[mic_dev, sys_dev, spk_dev],
+            outputs=[audio_save_status],
+        )
 
         voice_select.change(
             lambda vid: _on_voice_change(vid, valid_ids, invalid_ids),
@@ -583,6 +843,42 @@ def build_app(
             _on_device_change,
             inputs=[device_choice],
             outputs=[device_status],
+        )
+        llm_endpoint_input.change(
+            _on_llm_change,
+            inputs=[llm_endpoint_input, llm_api_key_input, asr_model_input],
+            outputs=[llm_status],
+        )
+        llm_api_key_input.change(
+            _on_llm_change,
+            inputs=[llm_endpoint_input, llm_api_key_input, asr_model_input],
+            outputs=[llm_status],
+        )
+        asr_model_input.change(
+            _on_llm_change,
+            inputs=[llm_endpoint_input, llm_api_key_input, asr_model_input],
+            outputs=[llm_status],
+        )
+        ptt_btn.click(
+            lambda mic, voice, spk, endpoint, api_key, asr, state: _chat_handle(
+                mic, voice, spk, endpoint, api_key, asr, valid_ids, state, inference_fct
+            ),
+            inputs=[
+                mic_dev,
+                voice_select,
+                spk_dev,
+                llm_endpoint_input,
+                llm_api_key_input,
+                asr_model_input,
+                chat_record_state,
+            ],
+            outputs=[
+                chat_record_state,
+                chat_status,
+                chat_transcript,
+                chat_reply,
+                chat_tts_status,
+            ],
         )
         take_over_btn.click(
             lambda: _set_takeover(True, device_label),
@@ -646,6 +942,13 @@ def build_app(
             _refresh_collection_stats,
             inputs=[collect_count_state, collect_seconds_state, n8n_send_toggle],
             outputs=[collect_info, collect_count_state, collect_seconds_state],
+        )
+
+        meter_timer = gr.Timer(2.0)
+        meter_timer.tick(
+            _poll_audio_status,
+            inputs=[mic_dev, sys_dev],
+            outputs=[mic_meter, sys_meter, listen_indicator, sys_banner],
         )
 
     return app

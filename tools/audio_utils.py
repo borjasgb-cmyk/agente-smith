@@ -42,6 +42,56 @@ def build_device_choices(devices: list[dict[str, Any]], kind: str) -> list[tuple
     return choices
 
 
+def pick_device_index(
+    devices: list[dict[str, Any]],
+    kind: str,
+    name_keywords: list[str],
+    hostapi_prefer: str | None = None,
+) -> int | None:
+    matches = []
+    for dev in devices:
+        if kind == "input" and dev["max_input_channels"] < 1:
+            continue
+        if kind == "output" and dev["max_output_channels"] < 1:
+            continue
+        name = dev["name"].lower()
+        if all(keyword.lower() in name for keyword in name_keywords):
+            matches.append(dev)
+    if not matches:
+        return None
+    if hostapi_prefer:
+        for dev in matches:
+            if hostapi_prefer.lower() in dev["hostapi"].lower():
+                return int(dev["index"])
+    return int(matches[0]["index"])
+
+
+def rms_meter(device_idx: int, duration: float = 0.2) -> dict[str, float | str]:
+    sample_rate = _pick_input_rate([device_idx])
+    if sample_rate is None:
+        return {"rms": 0.0, "peak": 0.0, "status": "UNAVAILABLE"}
+    try:
+        audio = sd.rec(
+            int(duration * sample_rate),
+            samplerate=sample_rate,
+            channels=1,
+            device=device_idx,
+            blocking=True,
+        ).astype(np.float32).squeeze()
+        rms = float(math.sqrt(float(np.mean(audio**2)))) if audio.size else 0.0
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        return {"rms": rms, "peak": peak, "status": "OK"}
+    except Exception:
+        return {"rms": 0.0, "peak": 0.0, "status": "ERROR"}
+
+
+def play_audio(audio: np.ndarray, sample_rate: int, device_idx: int | None) -> None:
+    if audio.size == 0:
+        return
+    sd.play(audio, samplerate=sample_rate, device=device_idx)
+    sd.wait()
+
+
 def sys_quick_check(sys_idx: int) -> dict[str, float | str]:
     duration = 3.0
     sample_rate = _pick_input_rate([sys_idx])
